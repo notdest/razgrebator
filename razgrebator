@@ -20,7 +20,7 @@ from PyQt5.QtGui import (QIcon, QPalette, QColor,
                          )
 
 from PyQt5.QtWidgets import (QWidget, QMenu, QLabel, QScrollArea,
-                             QApplication, QFileDialog, QAction,
+                             QApplication, QFileDialog, QAction,QStyleFactory,
                              QVBoxLayout, QLayout, QInputDialog, qApp,
                              QGraphicsPixmapItem, QGraphicsScene,
                              QGraphicsView, QGraphicsDropShadowEffect
@@ -71,10 +71,7 @@ class Filer:
         file_path = self.dialog.getOpenFileName(
                 parent=None,
                 caption='Выбор файла изображения',
-                directory=self.current_folder,
-                filter='Изображения('
-                       '*.bmp *.pbm *.pgm *.ppm *.xbm '
-                       '*.xpm *.jpg *.jpeg *.png *.gif *.JPG)'
+                directory=self.current_folder
         )[0]
 
         # обновление текущей папки
@@ -882,8 +879,15 @@ class MainWindow(QWidget):
     Связующий класс
     """
 
-    def __init__(self, start_image):
+    def __init__(self,start_image):
         super().__init__()
+
+        dialog = QFileDialog()
+        if start_image == '':
+            start_image = dialog.getOpenFileName(
+                parent=None,
+                caption='Выбор файла изображения'
+                )[0]
 
         self.binds = []
         self.is_image_altered = False
@@ -944,7 +948,6 @@ class MainWindow(QWidget):
         self.filer.list_folder(self.filer.current_folder)
 
         # создание и установка миниатюр
-        #aaaaaaaaaaaaaa
         self.turner_thread.finished.connect(self.turn_finished)
 
         # регистрация чистого выхода
@@ -1401,7 +1404,6 @@ def read_settings():
         SCALE_MAGNIFIER, MAGNIFIER_MOVE_BOOST, \
         BACKGROUND_COLOR, COPY_ON_SORTING, USE_OPENGL, SHOW_SHORT_INFO
 
-
     WITHOUT_BORDER = 'Yes'
     HINT_TIME = 2.5
     SCALE_STEP = 0.8
@@ -1414,38 +1416,23 @@ def read_settings():
     USE_OPENGL = 'No'
 
 
-def mopyqtiv_help():
-    print('\nНадо бы потереть текст создателя и своё вкорячить'
-        '\nmopyqtiv - программа для просмотра изображений, написанная на python,'
-          '\nс использованием библиотек PyQt пятой серии и PIL.'
-          '\nДля подробной справки:'
-          '\n\tman mopyqtiv'
-          '\n\nИспользование:'
-          '\n\tmopyqtiv [-h] [файл]'
-          '\n\t-h\tключ для показа этого сообщения'
-          '\n\tфайл\tпрограмма может открыть изображения следующих форматов:'
-          '\n\t\t*.bmp *.pbm *.pgm *.ppm *.xbm *.xpm *.jpg *.jpeg *.png *.gif')
-
-
 if __name__ == '__main__':
-    if os.name == 'nt':
-        print('Программа предназначена для операционной системы Linux.')
-        sys.exit(0)
 
-    elif '-h' in sys.argv:
-        mopyqtiv_help()
-        sys.exit(0)
-
-    elif len(sys.argv) > 2 or len(sys.argv) < 2:
-        print('Для запуска приложения mopyqtiv укажите открываемое изображение.',
-              '\nДля справки запустите с параметром -h')
-        sys.exit(0)
-
+    if len(sys.argv) < 2:           # добавил возможность не указывать имя картинки
+        start_image = ''
     else:
-        read_settings()
-        STOP_FLAG = Value('i', 0)
-        first, second = Pipe(duplex=True)
-        app = QApplication(sys.argv)
-        mainwindow = MainWindow(sys.argv[1])
-        mainwindow.show()
-        sys.exit(app.exec_())
+        start_image = sys.argv[1]
+
+    read_settings()
+    STOP_FLAG = Value('i', 0)
+    first, second = Pipe(duplex=True)
+
+    tmpargv     = sys.argv          # Атеншн, костыль (aaaaaaaa)
+    tmpargv.append('-style')        # Без этого на моем компе выплевывает варнинг
+    tmpargv.append('Fusion')
+
+
+    app = QApplication(tmpargv)
+    mainwindow = MainWindow(start_image)
+    mainwindow.show()
+    sys.exit(app.exec_())
