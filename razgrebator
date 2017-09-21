@@ -150,9 +150,8 @@ class Turner:
 
     def __init__(self):
         self.conn = first
-        self.maker = MiniaturesMaker()
 
-    def do_turn(self, image_path, degree, folder):
+    def do_turn(self, image_path, degree):
         try:
             with Image.open(image_path).convert('RGBA') as image:
                 size = image.size
@@ -163,8 +162,6 @@ class Turner:
             self.conn.send('ERROR')
             return
 
-        self.maker.folder = folder
-        self.maker.make_one_miniature((0, image_path))
 
     def turn_images(self, args):
         """
@@ -197,9 +194,6 @@ class TurnerThread(QThread):
             if message == 'ERROR':
                 self.error = True
                 break
-
-            elif message[0] == 'DONE':
-                self.main.miniatures_handler.update_miniature(message[3])
 
             elif message == 'FINISHED':
                 self.error = False
@@ -328,12 +322,6 @@ class PopupMenu(QMenu):
                     self.main.filer.files[i] = new_file_path
                     break
 
-            # корректировка виджета миниатюры
-            for miniature in self.main.miniatures_handler.list_miniatures_widgets():
-                if miniature.original_file == self.file:
-                    miniature.original_file = new_file_path
-                    break
-
             self.main.update_current_image(new_file_path)
             self.main.short_info.update()
 
@@ -419,419 +407,6 @@ class ShortInfo(InfoLabel):
         self.move(10, self.main.frame_resolution_height - 30)
         self.adjustSize()
         self.raise_()
-
-
-class Miniature(QLabel):
-    """
-    Отдельно взятая миниатюра с переписанными событиями щелчка мышью
-    """
-
-    def __init__(self, main):
-        super().__init__()
-        self.main = main
-
-        self.path = ''
-        self.original_file = ''
-        self.image = QPixmap()
-        self.setAttribute(Qt.WA_TranslucentBackground)
-
-        # подсветка активной миниатюры
-        self.shadow = QGraphicsDropShadowEffect()
-        self.shadow.setBlurRadius(10)
-        self.shadow.setColor(QColor("#00FFFF"))
-        self.shadow.setOffset(-2, 0)
-        self.setGraphicsEffect(self.shadow)
-        self.shadow.setEnabled(False)
-
-        # настройка выпадающего меню
-        self.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.customContextMenuRequested.connect(self.context_menu)
-
-    def mousePressEvent(self, event):
-        """
-        Установка картинки по щелчку на миниатюре
-        """
-        if event.button() == Qt.LeftButton:
-            self.main.update_current_image(self.original_file)
-            self.main.imageviewer.set_image(self.main.current_image,
-                                            self.main.imageviewer.scale_default
-                                            )
-
-    def context_menu(self, point):
-        """
-        Вызвает выпадающее меню
-        """
-        self.main.popup.file = self.original_file
-        self.main.popup.exec_(QCursor.pos())
-
-    def activate(self):
-        """
-        Применяет эффект тени на миниатюру
-        """
-        self.shadow.setEnabled(True)
-
-    def deactivate(self):
-        """
-        Отключает эффект тени
-        """
-        self.shadow.setEnabled(False)
-
-
-class MiniaturesFolderHandler:
-    """
-    Создаёт/обновляет/удаляет временную папку для миниатюр
-    """
-
-    def __init__(self):
-        self.folder = '/tmp/mopyqtiv.' + hashlib.sha1(os.urandom(8)).hexdigest()[:8]
-        self.create_folder()
-
-    def create_folder(self):
-        """
-        Удаляет старую и создаёт новую папку для миниатюр
-        """
-        self.remove_miniatures_folder()
-        os.mkdir(self.folder)
-
-    def remove_miniatures_folder(self):
-        """
-        Удаляет все относящиеся к программе временные папки в /tmp
-        """
-        for name in os.walk(top='/tmp', topdown=False):
-            if 'mopyqtiv' in name[0] and os.path.isdir(name[0]):
-                shutil.rmtree(name[0])
-
-
-class MiniaturesMaker:
-    """
-    Создаёт миниатюры для всех файлов в папке
-    """
-
-    def __init__(self):
-        self.conn = first
-        self.files = []
-        self.folder = ''
-
-    def make_one_miniature(self, index_and_file):
-        """
-        Создаёт одну миниатюру во временной папке
-        """
-        if STOP_FLAG.value == 1:
-            return
-
-        index = index_and_file[0]
-        file_path = index_and_file[1]
-        miniature_path = os.path.join(
-                self.folder,
-                os.path.split(file_path)[1]
-        )
-
-        try:
-            with Image.open(file_path) as miniature:
-                width = MINIATURE_WIDTH
-                ratio = width / miniature.size[0]
-                height = miniature.size[1] * ratio
-                miniature.thumbnail((width, height), resample=Image.LANCZOS)
-                miniature.save(miniature_path)
-                # отправка сообщения о готовности миниатюры
-                self.conn.send(['DONE', index, file_path, miniature_path])
-
-        except EnvironmentError or OSError:
-            return
-
-    def create_miniatures(self):
-        """
-        Запуск распараллеленного создания миниатюр
-        """
-        # индексирует входящие файлы
-        self.files = enumerate(self.files)
-
-        # раздача заданий по процессам
-        pool = Pool()
-        pool.map(self.make_one_miniature, self.files)
-        pool.close()
-        pool.join()
-
-        # разблокировка
-        STOP_FLAG.value = 0
-
-        # отправка сообщения о том, что все миниатюры сделаны
-        self.conn.send('STOP')
-
-
-
-class MiniaturesMakerThread(QThread):
-    """
-    Управляет созданием миниатюр в отдельном потоке
-    """
-
-    def __init__(self, main):
-        super().__init__()
-        self.main = main
-
-    def run(self):
-        maker = self.main.miniatures_handler.miniatures_maker
-        folder_handler = self.main.miniatures_handler.miniatures_folder_handler
-
-        maker.files = self.main.filer.files
-        maker.folder = folder_handler.folder
-
-        # разблокировка
-        STOP_FLAG.value = 0
-        maker.create_miniatures()
-
-
-class MiniaturesSetter(QThread):
-    """
-    Слушает сообщения о готовых миниатюрах
-    и отправляет сигнал на установку
-    """
-    minidone = pyqtSignal(int, str, str, name='MiniatureDone')
-
-    def __init__(self, main):
-        super().__init__()
-        self.main = main
-        self.conn = second
-
-    def run(self):
-        while True:
-            message = self.conn.recv()
-            # когда все миниатюры в папке созданы
-            if message == 'STOP':
-                break
-
-            # добавляет миниатюру в очередь
-            elif message[0] == 'DONE':
-                done = (message[1], message[2], message[3])
-                # выслать в сигнале: порядковый индекс виджета  done[0]
-                #                    путь до ориг. файла:       done[1]
-                #                    путь до миниатюры:         done[2]
-                self.minidone.emit(done[0], done[1], done[2])
-
-
-class MiniaturesArea(QWidget):
-    """
-    На этом виджете будут располагаться виджеты миниматюр
-    """
-
-    def __init__(self, main):
-        super().__init__()
-        self.main = main
-
-        # настройка раскладки
-        self.layout = QVBoxLayout(self)
-        self.layout.setSizeConstraint(QLayout.SetFixedSize)
-        self.setLayout(self.layout)
-
-
-class MiniaturesScroller(QScrollArea):
-    """
-    Этот класс добавляет область прокрутки на панель миниатюр
-    """
-
-    def __init__(self, main):
-        super().__init__(main)
-        self.main = main
-
-        # наложение прокрутки
-        self.miniatures_area = main.miniatures_area
-        self.setWidget(self.miniatures_area)
-
-        # чтобы работали стрелки
-        self.setFocusPolicy(Qt.NoFocus)
-
-        # настройка ползунков
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
-
-    def follow_view(self):
-        """
-        Прокручивает миниатюры в соответствии с текущей картинкой
-        """
-        # текущее положение картинки
-        position = 0
-        for miniature in self.main.miniatures_handler.list_miniatures_widgets():
-            if miniature.original_file == self.main.current_image:
-                position = miniature.pos().y()
-                break
-
-        position -= self.main.frame_resolution_height / 3
-        self.verticalScrollBar().setValue(position)
-
-
-class MiniaturesHandler(QObject):
-    """
-    Управляет подготовкой, созданием, изменением размера, удалением миниатюр
-    """
-    docreate = pyqtSignal(name='DoCreate')
-
-    def __init__(self, main):
-        super().__init__()
-        self.main = main
-        self.layout = self.main.miniatures_area.layout
-
-        # создание объектов обработки миниатюр
-        self.miniatures_maker = MiniaturesMaker()
-        self.miniatures_setter = MiniaturesSetter(main)
-        self.miniatures_folder_handler = MiniaturesFolderHandler()
-        self.miniatures_maker_thread = MiniaturesMakerThread(main)
-
-        # настройка связи между потоками
-        self.docreate.connect(self.create_miniatures)
-        self.miniatures_maker_thread.started.connect(self.miniatures_setter.start)
-        self.miniatures_setter.minidone.connect(self.set_one_miniature)
-        self.miniatures_setter.finished.connect(self.clean_bad_miniatures)
-
-    @pyqtSlot(name='CreateMiniatures')
-    def create_miniatures(self):
-        """
-        Запускает цикл создания миниатюр
-        """
-        for i in range(len(self.main.filer.files)):
-            self.layout.addWidget(Miniature(self.main))
-        self.miniatures_maker_thread.start()
-
-    def set_miniatures(self):
-        """
-        Отправляет сигнал на создание миниатюр
-        """
-        self.docreate.emit()
-
-    @pyqtSlot(int, str, str, name='MiniatureDone')
-    def set_one_miniature(self, index, file_path, miniature_path):
-        """
-        Создаёт и устанавливает одну миниатюру
-        """
-        try:
-            miniature = self.layout.itemAt(index).widget()
-            miniature.path = miniature_path
-            miniature.original_file = file_path
-
-        except AttributeError:
-            return
-
-        miniature.image.load(miniature_path)
-        print(miniature_path)
-        # поправка на изменённый размер окна self.main.coefficient
-        miniature_width = MINIATURE_WIDTH * self.main.coefficient
-        miniature_height = miniature_width / miniature.image.width() * \
-                           miniature.image.height()
-
-        miniature.setPixmap(
-                miniature.image.scaled(miniature_width,
-                                       miniature_height,
-                                       Qt.KeepAspectRatio,
-                                       Qt.FastTransformation
-                                       )
-        )
-
-    def highlight(self):
-        """
-        Выделяет миниатюру текущей картинки
-        Сбрасывает выделение с предыдущей
-        """
-        if self.main.last_image == self.main.current_image:
-            return
-
-        i = 0
-        for miniature in self.list_miniatures_widgets():
-            if i == 2:
-                break
-
-            elif miniature.original_file == self.main.last_image:
-                miniature.deactivate()
-                i += 1
-
-            elif miniature.original_file == self.main.current_image:
-                miniature.activate()
-                i += 1
-
-    def resize_miniatures(self, coefficient):
-        """
-        Изменяет размер всех виджетов миниатюр с сохранением пропорций
-        в зависимости от полученного коэффициента
-        """
-        for miniature in self.list_miniatures_widgets():
-            if miniature.image.isNull() is True:
-                return
-
-            miniature_width = MINIATURE_WIDTH * coefficient
-            miniature_height = miniature.image.height() * coefficient
-            miniature.resize(miniature_width,
-                             miniature_height
-                             )
-
-            miniature.setPixmap(
-                    miniature.image.scaled(miniature_width,
-                                           miniature_height,
-                                           Qt.KeepAspectRatio,
-                                           Qt.FastTransformation
-                                           )
-            )
-
-    def list_miniatures_widgets(self):
-        """
-        Возвращает список виджетов миниатюр
-        """
-        miniatures_widgets = (
-            self.layout.itemAt(i).widget()
-            for i in range(self.layout.count())
-        )
-
-        return miniatures_widgets
-
-    def clean_bad_miniatures(self):
-        """
-        Очищает миниатюры от лишних элементов
-        """
-        for miniature in self.list_miniatures_widgets():
-            if miniature.image.isNull() is True:
-                miniature.deleteLater()
-
-    def purge_miniature(self, file_for_delete):
-        """
-        Удаляет виджет миниатюры переданного файла
-        """
-        for miniature in self.list_miniatures_widgets():
-            if miniature.original_file == file_for_delete:
-                # попытка удаления миниатюры
-                try:
-                    os.remove(miniature.path)
-                # если файла миниатюры нет
-                except FileNotFoundError or OSError:
-                    pass
-
-                # удаление виджета миниатюры
-                miniature.deleteLater()
-                break
-
-    def purge_all_miniatures(self):
-        """
-        Удаление всех миниатюр
-        """
-        for miniature in self.list_miniatures_widgets():
-            miniature.deleteLater()
-        self.main.miniatures_handler.miniatures_folder_handler.create_folder()
-
-    def update_miniature(self, path):
-        """
-        Обновляет миниатюру переданного файла
-        """
-        for miniature in self.list_miniatures_widgets():
-            if miniature.path == path:
-                miniature.image.load(miniature.path)
-                # расчёт нового размера миниатюры
-                miniature_width = MINIATURE_WIDTH * self.main.coefficient
-                miniature_height = MINIATURE_WIDTH / miniature.image.width() * \
-                                   miniature.image.height()
-                miniature.setPixmap(
-                        miniature.image.scaled(miniature_width,
-                                               miniature_height,
-                                               Qt.KeepAspectRatio,
-                                               Qt.FastTransformation
-                                               )
-                )
-                break
 
 
 class ImageViewer(QGraphicsView):
@@ -945,7 +520,6 @@ class ImageViewer(QGraphicsView):
         if SHOW_SHORT_INFO == 'Yes':
             self.main.short_info.update()
 
-        self.main.miniatures_handler.highlight()
         self.main.change_title(os.path.split(self.main.current_image)[1])
 
     def set_img_center(self):
@@ -1266,18 +840,6 @@ class ImageViewer(QGraphicsView):
         elif self.is_scaled is True:
             QGraphicsView.mouseMoveEvent(self, event)
 
-        # появление панели миниатюр в зависимости от положения курсора мыши
-        if qApp.mouseButtons() != Qt.LeftButton:
-            # 20 - кол-во пикселей от правого края,
-            # заходя за которые курсором мыши, появится панель миниатюр
-            if QCursor.pos().x() > self.main.pos().x() + \
-                    self.main.frame_resolution_width - 20:
-                self.main.miniatures_scroller.show()
-                self.main.miniatures_scroller.follow_view()
-            if QCursor.pos().x() < self.main.pos().x() + \
-                    self.main.frame_resolution_width - \
-                    self.main.miniature_current_width:
-                self.main.miniatures_scroller.hide()
 
     def mouseReleaseEvent(self, event):
         """
@@ -1329,7 +891,6 @@ class MainWindow(QWidget):
         self.last_image = self.current_image
         self.program_icon = QIcon.fromTheme('pixelart-trace')
         self.trash_path = os.path.expanduser('~') + '/.local/share/Trash'
-        self.miniature_current_width = MINIATURE_WIDTH
         self.screen_resolution = QApplication.desktop().screenGeometry()
 
         # для корректировки размера миниатюр
@@ -1376,19 +937,14 @@ class MainWindow(QWidget):
         self.short_info = ShortInfo(self)
         self.imageviewer = ImageViewer(self)
         self.turner_thread = TurnerThread(self)
-        self.miniatures_area = MiniaturesArea(self)
-        self.miniatures_handler = MiniaturesHandler(self)
-        self.miniatures_scroller = MiniaturesScroller(self)
 
-        # настройка области прокрутки панели миниатюр
-        self.miniatures_scroller.focusNextPrevChild(True)
-        self.miniatures_scroller.hide()
+
 
         # создаёт список картинок из текущей папки
         self.filer.list_folder(self.filer.current_folder)
 
         # создание и установка миниатюр
-        self.miniatures_handler.set_miniatures()
+        #aaaaaaaaaaaaaa
         self.turner_thread.finished.connect(self.turn_finished)
 
         # регистрация чистого выхода
@@ -1448,8 +1004,6 @@ class MainWindow(QWidget):
                     print('mopyqtiv: изображений в папке больше нет')
                     sys.exit(0)
 
-                # удаление его миниатюры
-                self.miniatures_handler.purge_miniature(file_path)
 
                 self.info.show_hint('<font color="#00ff00">Файл «<font color="#ffff00">'
                                     '{0}</font>» перемещен в корзину</font>'.format(
@@ -1544,7 +1098,6 @@ class MainWindow(QWidget):
         Поворачивает изображение image_path
         в зависимости от параметра degree
         """
-        folder = self.miniatures_handler.miniatures_folder_handler.folder
         self.turner_thread.args = (image_path, degree, folder)
         self.turner_thread.start()
 
@@ -1589,8 +1142,7 @@ class MainWindow(QWidget):
         self.filer.list_folder(self.filer.current_folder)
         self.update_current_image(file_path)
         self.imageviewer.set_image(file_path, self.imageviewer.scale_default)
-        self.miniatures_handler.purge_all_miniatures()
-        self.miniatures_handler.set_miniatures()
+
 
     def try_hand_cursor(self, event):
         """
@@ -1665,7 +1217,6 @@ class MainWindow(QWidget):
                         self.next_image()
 
                     self.filer.files.remove(path_for_action)
-                    self.miniatures_handler.purge_miniature(path_for_action)
                     message = 'перемещён'
 
                 else:
@@ -1778,8 +1329,7 @@ class MainWindow(QWidget):
         """
         Настройка комбинаций с колёсиком мыши
         """
-        if self.miniatures_scroller.isVisible() is True:
-            return
+
 
         step = event.angleDelta().y()  # -120 колёсико на себя, 120 - от себя
         ier = int(math.fabs(step) / 120)
@@ -1830,19 +1380,6 @@ class MainWindow(QWidget):
         )
         self.imageviewer.set_image(self.current_image, self.imageviewer.scale_default)
 
-        # настройка размера и положения миниатюр
-        self.coefficient = self.frameSize().width() / self.screen_resolution.width()
-        self.miniature_current_width = self.coefficient * MINIATURE_WIDTH
-        self.miniatures_handler.resize_miniatures(self.coefficient)
-        self.miniatures_scroller.move(
-                self.frame_resolution_width -
-                (self.miniature_current_width + 36), 0
-        )
-
-        # 36: компенсатор размера прокрутки
-        self.miniatures_scroller.resize(self.miniature_current_width + 36,
-                                        self.frame_resolution_height
-                                        )
 
     def closeEvent(self, event):
         """
@@ -1856,13 +1393,12 @@ class MainWindow(QWidget):
         """
         self.info.hide()
         self.short_info.hide()
-        self.miniatures_handler.miniatures_folder_handler.remove_miniatures_folder()
 
 
 def read_settings():
     global WITHOUT_BORDER, HINT_TIME, SCALE_STEP, \
         ROTATE_STEP, SCALE_MAGNIFIER, MAGNIFIER_MOVE_BOOST, \
-        SCALE_MAGNIFIER, MAGNIFIER_MOVE_BOOST, MINIATURE_WIDTH, \
+        SCALE_MAGNIFIER, MAGNIFIER_MOVE_BOOST, \
         BACKGROUND_COLOR, COPY_ON_SORTING, USE_OPENGL, SHOW_SHORT_INFO
 
 
@@ -1872,7 +1408,6 @@ def read_settings():
     ROTATE_STEP = 5.0
     SCALE_MAGNIFIER = 2.5
     MAGNIFIER_MOVE_BOOST = 1.7
-    MINIATURE_WIDTH = 250
     BACKGROUND_COLOR = '#000000'
     SHOW_SHORT_INFO = 'Yes'
     COPY_ON_SORTING = 'No'
