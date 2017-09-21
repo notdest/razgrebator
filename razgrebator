@@ -1,0 +1,1932 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+__version__ = 0.3
+##########################################################################
+# Copyright [2016] [Евгений]
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+##########################################################################
+#  Для работы на archlinux требуются пакеты python-pyqt5, python-pillow
+##########################################################################
+
+import os  # операции с файлами
+import sys  # аргументы командной строки
+import time  # для меток удаляемых файлов
+import math  # для расчёта размеров графической сцены
+import shutil  # для удаления файлов
+import atexit  # для удаления временных файлов при выходе
+import hashlib  # для рандомных имён временных папок
+
+from configparser import ConfigParser  # чтение настроек
+
+from PIL import Image
+from multiprocessing import Pool, Pipe, Process, Value
+
+from PyQt5.QtGui import (QIcon, QPalette, QColor,
+                         QFont, QPixmap, QCursor,
+                         QTransform, QBrush
+                         )
+
+from PyQt5.QtWidgets import (QWidget, QMenu, QLabel, QScrollArea,
+                             QApplication, QFileDialog, QAction,
+                             QVBoxLayout, QLayout, QInputDialog, qApp,
+                             QGraphicsPixmapItem, QGraphicsScene,
+                             QGraphicsView, QGraphicsDropShadowEffect
+                             )
+
+from PyQt5.QtCore import (Qt, QThread, QFileInfo, QTimer,
+                          pyqtSignal, pyqtSlot, QObject)
+
+from PyQt5.QtOpenGL import QGLWidget
+
+
+class Filer:
+    """
+    Этот класс создаёт и обновляет список файлов
+    """
+
+    def __init__(self, start_image):
+        self.files = []
+        self.current_folder = os.path.abspath(
+                os.path.split(start_image)[0]
+        )  # запись текущей папки
+        self.dialog = QFileDialog()  # диалог выбора файлов
+        self.available_extensions = ('.bmp', '.pbm', '.pgm', '.ppm', '.xbm',
+                                     '.xpm', '.jpg', '.jpeg', '.png', '.gif'
+                                     )
+
+    def list_folder(self, path):
+        """
+        создаёт список изобр. папки -> self.files
+        """
+        self.files = []  # очистка списка изображений
+        try:
+            for name in os.listdir(path):
+                # фильтр по расширению
+                if os.path.splitext(name)[1].lower() in self.available_extensions:
+                    self.files.append(os.path.join(path, name))
+            self.files = list(set(self.files))  # не допускает дубликатов
+            self.files.sort()
+
+        except FileNotFoundError:
+            print('mopyqtiv: нет такого файла или каталога.')
+            sys.exit(0)
+
+    def choose_file(self):
+        """
+        Диалог выбора картинки: возвращает путь для выбранного файла
+        """
+        file_path = self.dialog.getOpenFileName(
+                parent=None,
+                caption='Выбор файла изображения',
+                directory=self.current_folder,
+                filter='Изображения('
+                       '*.bmp *.pbm *.pgm *.ppm *.xbm '
+                       '*.xpm *.jpg *.jpeg *.png *.gif)'
+        )[0]
+
+        # обновление текущей папки
+        self.current_folder = os.path.split(file_path)[0]
+
+        return file_path
+
+    def choose_folder(self):
+        """
+        Диалог выбора папки: возвращает полный путь
+        """
+        folder_path = self.dialog.getExistingDirectory(
+                parent=None,
+                caption='Выбор папки для сортировки',
+                directory=self.current_folder
+        )
+
+        return folder_path
+
+    def file_size(self, file_path):
+        """
+        Возвращает удобочитаемый размер файла
+        """
+        file = QFileInfo(file_path)
+        size = file.size()
+
+        if size < 1024:
+            return str(size), 'байт'
+
+        elif 1024 <= size < 1048576:
+            return str(round(size / 1024, 1)), 'Кб'
+
+        else:
+            return str(round(size / 1048576, 1)), 'Мб'
+
+
+class Bind:
+    """
+    Объект временной связи клавиша -> папка
+    Используется для сортировки изображений
+    """
+
+    def __init__(self):
+        self.key = ''
+        self.path = ''
+
+    def action(self, image_path):
+        """
+        Отправляет изображение image_path по адресу destination
+        В зависимости от настройки копирует или перемещает
+        """
+        destination = os.path.join(self.path, os.path.split(image_path)[1])
+
+        # исключение перезаписи конечного файла с тем же именем
+        i = 0
+        path, ext = os.path.splitext(destination)
+        while os.path.isfile(destination):
+            i += 1
+            new_path = path + '_({0})'.format(str(i))
+            destination = new_path + ext
+
+        # перемещение или копирование при сортировке
+        if COPY_ON_SORTING == 'Yes':
+            shutil.copy(image_path, destination)
+        else:
+            shutil.move(image_path, destination)
+
+
+class Turner:
+    """
+    Поворачивает изображение и его миниатюру
+    """
+
+    def __init__(self):
+        self.conn = first
+        self.maker = MiniaturesMaker()
+
+    def do_turn(self, image_path, degree, folder):
+        try:
+            with Image.open(image_path).convert('RGBA') as image:
+                size = image.size
+                image = image.rotate(degree, resample=Image.NEAREST, expand=True)
+                image = image.resize((size[1], size[0]), resample=Image.LANCZOS)
+                image.save(image_path, quality=90)
+        except OSError:
+            self.conn.send('ERROR')
+            return
+
+        self.maker.folder = folder
+        self.maker.make_one_miniature((0, image_path))
+
+    def turn_images(self, args):
+        """
+        Управляет поворотом в потоках
+        """
+        process = Process(target=self.do_turn, args=args)
+        process.start()
+        process.join()
+        self.conn.send('FINISHED')
+
+
+class TurnerThread(QThread):
+    """
+    Управляет поворотом изображений в отдельном процессе
+    """
+
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        self.args = ()
+        self.degree = 0
+        self.conn = second
+        self.error = False
+        self.turner = Turner()
+
+    def run(self):
+        self.turner.turn_images(self.args)
+        while True:
+            message = self.conn.recv()
+            if message == 'ERROR':
+                self.error = True
+                break
+
+            elif message[0] == 'DONE':
+                self.main.miniatures_handler.update_miniature(message[3])
+
+            elif message == 'FINISHED':
+                self.error = False
+                break
+
+
+class PopupMenu(QMenu):
+    """
+    Всплывающее меню
+    """
+
+    def __init__(self, main):
+        super().__init__()
+
+        self.main = main
+        self.file = ''
+
+        # описание действий
+        info_action = QAction(
+                QIcon.fromTheme('exifinfo'),
+                'Информация',
+                self
+        )
+
+        choose_action = QAction(
+                QIcon.fromTheme('document-open-folder'),
+                'Открыть изображение',
+                self
+        )
+
+        rename_action = QAction(
+                QIcon.fromTheme('edit-rename'),
+                'Переименовать',
+                self
+        )
+
+        turn_right_action = QAction(
+                QIcon.fromTheme('object-rotate-right'),
+                'Повернуть вправо',
+                self
+        )
+
+        turn_left_action = QAction(
+                QIcon.fromTheme('object-rotate-left'),
+                'Повернуть влево',
+                self
+        )
+
+        trash_action = QAction(
+                QIcon.fromTheme('trash-empty'),
+                'Отправить в корзину',
+                self
+        )
+
+        exit_action = QAction(
+                QIcon.fromTheme('application-exit'),
+                'Выход',
+                self
+        )
+
+        info_action.triggered.connect(self.show_info)
+        choose_action.triggered.connect(self.main.choose_file)
+        rename_action.triggered.connect(self.rename_img)
+        turn_right_action.triggered.connect(lambda: self.main.turn_right(self.file))
+        turn_left_action.triggered.connect(lambda: self.main.turn_left(self.file))
+        trash_action.triggered.connect(lambda: self.main.trash(self.file))
+        exit_action.triggered.connect(sys.exit)
+
+        # сборка выпадающего меню
+        self.addAction(info_action)
+        self.addAction(choose_action)
+        self.addAction(rename_action)
+        self.addSeparator()
+        self.addAction(turn_right_action)
+        self.addAction(turn_left_action)
+        self.addSeparator()
+        self.addAction(trash_action)
+        self.addSeparator()
+        self.addAction(exit_action)
+
+    def show_info(self):
+        """
+        Показывает краткую информацию по файлу
+        """
+        count = len(self.main.filer.files)
+        index = self.main.filer.files.index(self.file) + 1
+        file_name = os.path.split(self.file)[1]
+        pixmap = QPixmap(self.file)
+        width = pixmap.width()
+        height = pixmap.height()
+        size = self.main.filer.file_size(self.file)
+
+        self.main.info.show_hint(
+                '<font color="#00ff00">«<font color="#ffff00"><b>'
+                '{0}</b></font>»: разрешение <font color="#ffff00"><b>'
+                '{1}<font color="#00ff00">x</font>'
+                '{2}</b></font>, размер <font color="#ffff00"><b>'
+                '{3}</b></font> <font color="#00ff00">'
+                '{4}</font> (<font color="#ffff00"><b>'
+                '{5}<font color="#00ff00">/</font>'
+                '{6}</b></font>)</font>'.format(
+                        file_name, width, height,
+                        size[0], size[1], index, count
+                )
+        )
+
+    def rename_img(self):
+        """
+        Показывает диалог для переименовывания файла
+        """
+        file_name = os.path.split(self.file)[1]
+        text, accepted = QInputDialog.getText(self,
+                                              "Переименовывание файла",
+                                              "Введите новое имя файла",
+                                              text=file_name
+                                              )
+        if accepted and text > '':
+            new_file_path = os.path.join(os.path.split(self.file)[0], text)
+
+            # переименовывание файла оригинала
+            shutil.move(self.file, new_file_path)
+
+            # корректировка списка файлов
+            for i, file in enumerate(self.main.filer.files):
+                if file == self.file:
+                    self.main.filer.files[i] = new_file_path
+                    break
+
+            # корректировка виджета миниатюры
+            for miniature in self.main.miniatures_handler.list_miniatures_widgets():
+                if miniature.original_file == self.file:
+                    miniature.original_file = new_file_path
+                    break
+
+            self.main.update_current_image(new_file_path)
+            self.main.short_info.update()
+
+
+class InfoLabel(QLabel):
+    """
+    Используется для показа сообщений в левом нижнем углу экрана
+    """
+
+    def __init__(self, main):
+        super().__init__(main)
+
+        self.main = main
+        self.setMargin(5)
+        self.resize(50, 30)
+        self.setWindowFlags(Qt.WindowStaysOnTopHint |
+                            Qt.FramelessWindowHint |
+                            Qt.X11BypassWindowManagerHint)
+        self.setMaximumWidth(main.frame_resolution_width - 80)
+
+        self.font = QFont()
+        self.font.setItalic(True)
+        self.font.setPointSize(14)
+        self.font.setFamily('Liberation Serif')
+        self.setFont(self.font)
+        self.shadow = QGraphicsDropShadowEffect()
+        self.shadow.setBlurRadius(0)
+        self.shadow.setColor(QColor("#001100"))
+        self.shadow.setOffset(1, 1)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setGraphicsEffect(self.shadow)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def show_hint(self, text):
+        """
+        Показывает сообщение text
+        """
+        self.timer = QTimer()
+        self.timer.setInterval(HINT_TIME * 1000)
+        self.timer.timeout.connect(self.close_hint)
+        self.setText(text)
+        self.adjustSize()
+        self.move(40, self.main.frame_resolution_height - 60)
+        self.show()
+        self.raise_()
+        self.timer.start()
+
+    def close_hint(self):
+        """
+        Выполняется при завершении работы таймера self.timer
+        """
+        self.hide()
+        self.timer.deleteLater()
+
+
+class ShortInfo(InfoLabel):
+    """
+    Показывает краткую информацию по текущей картинке
+    """
+
+    def __init__(self, main):
+        super().__init__(main)
+
+        self.font.setPointSize(11)
+        self.setFont(self.font)
+
+        if SHOW_SHORT_INFO == 'Yes':
+            self.show()
+
+    def update(self):
+        count = len(self.main.filer.files)
+        index = self.main.filer.files.index(self.main.current_image) + 1
+        file_name = os.path.split(self.main.current_image)[1]
+        size = self.main.filer.file_size(self.main.current_image)
+        width = self.main.imageviewer.current_pixmap.width()
+        height = self.main.imageviewer.current_pixmap.height()
+        self.setText(
+                '<font color="#00ff00">'
+                '{0}  {1}x{2}  {3} {4}   {5}/{6}</font>'.format(
+                        file_name, width, height, size[0], size[1], index, count
+                )
+        )
+        self.move(10, self.main.frame_resolution_height - 30)
+        self.adjustSize()
+        self.raise_()
+
+
+class Miniature(QLabel):
+    """
+    Отдельно взятая миниатюра с переписанными событиями щелчка мышью
+    """
+
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+
+        self.path = ''
+        self.original_file = ''
+        self.image = QPixmap()
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        # подсветка активной миниатюры
+        self.shadow = QGraphicsDropShadowEffect()
+        self.shadow.setBlurRadius(10)
+        self.shadow.setColor(QColor("#00FFFF"))
+        self.shadow.setOffset(-2, 0)
+        self.setGraphicsEffect(self.shadow)
+        self.shadow.setEnabled(False)
+
+        # настройка выпадающего меню
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.context_menu)
+
+    def mousePressEvent(self, event):
+        """
+        Установка картинки по щелчку на миниатюре
+        """
+        if event.button() == Qt.LeftButton:
+            self.main.update_current_image(self.original_file)
+            self.main.imageviewer.set_image(self.main.current_image,
+                                            self.main.imageviewer.scale_default
+                                            )
+
+    def context_menu(self, point):
+        """
+        Вызвает выпадающее меню
+        """
+        self.main.popup.file = self.original_file
+        self.main.popup.exec_(QCursor.pos())
+
+    def activate(self):
+        """
+        Применяет эффект тени на миниатюру
+        """
+        self.shadow.setEnabled(True)
+
+    def deactivate(self):
+        """
+        Отключает эффект тени
+        """
+        self.shadow.setEnabled(False)
+
+
+class MiniaturesFolderHandler:
+    """
+    Создаёт/обновляет/удаляет временную папку для миниатюр
+    """
+
+    def __init__(self):
+        self.folder = '/tmp/mopyqtiv.' + hashlib.sha1(os.urandom(8)).hexdigest()[:8]
+        self.create_folder()
+
+    def create_folder(self):
+        """
+        Удаляет старую и создаёт новую папку для миниатюр
+        """
+        self.remove_miniatures_folder()
+        os.mkdir(self.folder)
+
+    def remove_miniatures_folder(self):
+        """
+        Удаляет все относящиеся к программе временные папки в /tmp
+        """
+        for name in os.walk(top='/tmp', topdown=False):
+            if 'mopyqtiv' in name[0] and os.path.isdir(name[0]):
+                shutil.rmtree(name[0])
+
+
+class MiniaturesMaker:
+    """
+    Создаёт миниатюры для всех файлов в папке
+    """
+
+    def __init__(self):
+        self.conn = first
+        self.files = []
+        self.folder = ''
+
+    def make_one_miniature(self, index_and_file):
+        """
+        Создаёт одну миниатюру во временной папке
+        """
+        if STOP_FLAG.value == 1:
+            return
+
+        index = index_and_file[0]
+        file_path = index_and_file[1]
+        miniature_path = os.path.join(
+                self.folder,
+                os.path.split(file_path)[1]
+        )
+
+        try:
+            with Image.open(file_path) as miniature:
+                width = MINIATURE_WIDTH
+                ratio = width / miniature.size[0]
+                height = miniature.size[1] * ratio
+                miniature.thumbnail((width, height), resample=Image.LANCZOS)
+                miniature.save(miniature_path)
+                # отправка сообщения о готовности миниатюры
+                self.conn.send(['DONE', index, file_path, miniature_path])
+
+        except EnvironmentError or OSError:
+            return
+
+    def create_miniatures(self):
+        """
+        Запуск распараллеленного создания миниатюр
+        """
+        # индексирует входящие файлы
+        self.files = enumerate(self.files)
+
+        # раздача заданий по процессам
+        pool = Pool()
+        pool.map(self.make_one_miniature, self.files)
+        pool.close()
+        pool.join()
+
+        # разблокировка
+        STOP_FLAG.value = 0
+
+        # отправка сообщения о том, что все миниатюры сделаны
+        self.conn.send('STOP')
+
+
+
+class MiniaturesMakerThread(QThread):
+    """
+    Управляет созданием миниатюр в отдельном потоке
+    """
+
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+
+    def run(self):
+        maker = self.main.miniatures_handler.miniatures_maker
+        folder_handler = self.main.miniatures_handler.miniatures_folder_handler
+
+        maker.files = self.main.filer.files
+        maker.folder = folder_handler.folder
+
+        # разблокировка
+        STOP_FLAG.value = 0
+        maker.create_miniatures()
+
+
+class MiniaturesSetter(QThread):
+    """
+    Слушает сообщения о готовых миниатюрах
+    и отправляет сигнал на установку
+    """
+    minidone = pyqtSignal(int, str, str, name='MiniatureDone')
+
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        self.conn = second
+
+    def run(self):
+        while True:
+            message = self.conn.recv()
+            # когда все миниатюры в папке созданы
+            if message == 'STOP':
+                break
+
+            # добавляет миниатюру в очередь
+            elif message[0] == 'DONE':
+                done = (message[1], message[2], message[3])
+                # выслать в сигнале: порядковый индекс виджета  done[0]
+                #                    путь до ориг. файла:       done[1]
+                #                    путь до миниатюры:         done[2]
+                self.minidone.emit(done[0], done[1], done[2])
+
+
+class MiniaturesArea(QWidget):
+    """
+    На этом виджете будут располагаться виджеты миниматюр
+    """
+
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+
+        # настройка раскладки
+        self.layout = QVBoxLayout(self)
+        self.layout.setSizeConstraint(QLayout.SetFixedSize)
+        self.setLayout(self.layout)
+
+
+class MiniaturesScroller(QScrollArea):
+    """
+    Этот класс добавляет область прокрутки на панель миниатюр
+    """
+
+    def __init__(self, main):
+        super().__init__(main)
+        self.main = main
+
+        # наложение прокрутки
+        self.miniatures_area = main.miniatures_area
+        self.setWidget(self.miniatures_area)
+
+        # чтобы работали стрелки
+        self.setFocusPolicy(Qt.NoFocus)
+
+        # настройка ползунков
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+
+    def follow_view(self):
+        """
+        Прокручивает миниатюры в соответствии с текущей картинкой
+        """
+        # текущее положение картинки
+        position = 0
+        for miniature in self.main.miniatures_handler.list_miniatures_widgets():
+            if miniature.original_file == self.main.current_image:
+                position = miniature.pos().y()
+                break
+
+        position -= self.main.frame_resolution_height / 3
+        self.verticalScrollBar().setValue(position)
+
+
+class MiniaturesHandler(QObject):
+    """
+    Управляет подготовкой, созданием, изменением размера, удалением миниатюр
+    """
+    docreate = pyqtSignal(name='DoCreate')
+
+    def __init__(self, main):
+        super().__init__()
+        self.main = main
+        self.layout = self.main.miniatures_area.layout
+
+        # создание объектов обработки миниатюр
+        self.miniatures_maker = MiniaturesMaker()
+        self.miniatures_setter = MiniaturesSetter(main)
+        self.miniatures_folder_handler = MiniaturesFolderHandler()
+        self.miniatures_maker_thread = MiniaturesMakerThread(main)
+
+        # настройка связи между потоками
+        self.docreate.connect(self.create_miniatures)
+        self.miniatures_maker_thread.started.connect(self.miniatures_setter.start)
+        self.miniatures_setter.minidone.connect(self.set_one_miniature)
+        self.miniatures_setter.finished.connect(self.clean_bad_miniatures)
+
+    @pyqtSlot(name='CreateMiniatures')
+    def create_miniatures(self):
+        """
+        Запускает цикл создания миниатюр
+        """
+        for i in range(len(self.main.filer.files)):
+            self.layout.addWidget(Miniature(self.main))
+        self.miniatures_maker_thread.start()
+
+    def set_miniatures(self):
+        """
+        Отправляет сигнал на создание миниатюр
+        """
+        self.docreate.emit()
+
+    @pyqtSlot(int, str, str, name='MiniatureDone')
+    def set_one_miniature(self, index, file_path, miniature_path):
+        """
+        Создаёт и устанавливает одну миниатюру
+        """
+        try:
+            miniature = self.layout.itemAt(index).widget()
+            miniature.path = miniature_path
+            miniature.original_file = file_path
+
+        except AttributeError:
+            return
+
+        miniature.image.load(miniature_path)
+
+        # поправка на изменённый размер окна self.main.coefficient
+        miniature_width = MINIATURE_WIDTH * self.main.coefficient
+        miniature_height = miniature_width / miniature.image.width() * \
+                           miniature.image.height()
+
+        miniature.setPixmap(
+                miniature.image.scaled(miniature_width,
+                                       miniature_height,
+                                       Qt.KeepAspectRatio,
+                                       Qt.FastTransformation
+                                       )
+        )
+
+    def highlight(self):
+        """
+        Выделяет миниатюру текущей картинки
+        Сбрасывает выделение с предыдущей
+        """
+        if self.main.last_image == self.main.current_image:
+            return
+
+        i = 0
+        for miniature in self.list_miniatures_widgets():
+            if i == 2:
+                break
+
+            elif miniature.original_file == self.main.last_image:
+                miniature.deactivate()
+                i += 1
+
+            elif miniature.original_file == self.main.current_image:
+                miniature.activate()
+                i += 1
+
+    def resize_miniatures(self, coefficient):
+        """
+        Изменяет размер всех виджетов миниатюр с сохранением пропорций
+        в зависимости от полученного коэффициента
+        """
+        for miniature in self.list_miniatures_widgets():
+            if miniature.image.isNull() is True:
+                return
+
+            miniature_width = MINIATURE_WIDTH * coefficient
+            miniature_height = miniature.image.height() * coefficient
+            miniature.resize(miniature_width,
+                             miniature_height
+                             )
+
+            miniature.setPixmap(
+                    miniature.image.scaled(miniature_width,
+                                           miniature_height,
+                                           Qt.KeepAspectRatio,
+                                           Qt.FastTransformation
+                                           )
+            )
+
+    def list_miniatures_widgets(self):
+        """
+        Возвращает список виджетов миниатюр
+        """
+        miniatures_widgets = (
+            self.layout.itemAt(i).widget()
+            for i in range(self.layout.count())
+        )
+
+        return miniatures_widgets
+
+    def clean_bad_miniatures(self):
+        """
+        Очищает миниатюры от лишних элементов
+        """
+        for miniature in self.list_miniatures_widgets():
+            if miniature.image.isNull() is True:
+                miniature.deleteLater()
+
+    def purge_miniature(self, file_for_delete):
+        """
+        Удаляет виджет миниатюры переданного файла
+        """
+        for miniature in self.list_miniatures_widgets():
+            if miniature.original_file == file_for_delete:
+                # попытка удаления миниатюры
+                try:
+                    os.remove(miniature.path)
+                # если файла миниатюры нет
+                except FileNotFoundError or OSError:
+                    pass
+
+                # удаление виджета миниатюры
+                miniature.deleteLater()
+                break
+
+    def purge_all_miniatures(self):
+        """
+        Удаление всех миниатюр
+        """
+        for miniature in self.list_miniatures_widgets():
+            miniature.deleteLater()
+        self.main.miniatures_handler.miniatures_folder_handler.create_folder()
+
+    def update_miniature(self, path):
+        """
+        Обновляет миниатюру переданного файла
+        """
+        for miniature in self.list_miniatures_widgets():
+            if miniature.path == path:
+                miniature.image.load(miniature.path)
+                # расчёт нового размера миниатюры
+                miniature_width = MINIATURE_WIDTH * self.main.coefficient
+                miniature_height = MINIATURE_WIDTH / miniature.image.width() * \
+                                   miniature.image.height()
+                miniature.setPixmap(
+                        miniature.image.scaled(miniature_width,
+                                               miniature_height,
+                                               Qt.KeepAspectRatio,
+                                               Qt.FastTransformation
+                                               )
+                )
+                break
+
+
+class ImageViewer(QGraphicsView):
+    """
+    Центральный виджет просмотрщика изображений
+    """
+
+    def __init__(self, main):
+        super().__init__(main)
+
+        self.main = main  # для обращений к классу главного окна
+        self.ratio = 0  # отношения сторон картинки
+        self.rotation = 0  # запись текущего угла повората картинки
+        self.is_scaled = False
+        self.is_magnified = False
+        self.scale_default = 1.0
+        self.current_scale = 1.0  # текущий коэффициент масштаба
+        self.current_pixmap = QPixmap()  # pixmap текущего изображения
+        self.current_pixmap.path = ''  # для запись пути текущей картинки
+        self.current_img_width = 0
+        self.current_img_height = 0
+
+        # настройка сцены
+        self.transform = QTransform()
+        self.brush = QBrush(self.main.background_color)
+        self.img_scene = QGraphicsScene()
+        self.img_scene.setBackgroundBrush(self.brush)
+        self.img_item = QGraphicsPixmapItem()
+        self.img_scene.addItem(self.img_item)
+        self.setScene(self.img_scene)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setAlignment(Qt.AlignCenter)
+
+        # на любителя: OpenGL
+        if USE_OPENGL == 'Yes':
+            self.setViewport(QGLWidget())
+
+        # настройка управления
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.NoFocus)
+
+        # для комбинаций кнопок мыши
+        self.lb_held = False
+        self.rb_held = False
+        self.rb_combined = False
+
+    def set_image(self, image_path, scale):
+        """
+        Используется для установки/обновления изображения на центральном виджете
+        """
+        # для избежания повторной подгрузки изображения
+        if self.current_pixmap.path != image_path \
+                or self.main.is_image_altered is True:
+            self.current_pixmap = QPixmap(image_path)
+            self.main.is_image_altered = False
+            self.set_img_center()
+            self.rotation = 0
+
+            # запись пути файла к текущему pixmap
+            self.current_pixmap.path = image_path
+
+            # проверка читаемости картинки
+            if self.check_pixmap(self.current_pixmap) is False:
+                return
+
+        # запись размера текущей картинки в полную величину
+        self.current_img_width = self.current_pixmap.width()
+        self.current_img_height = self.current_pixmap.height()
+
+        # сброс коэффициента масштабирования
+        self.ratio = 1.0
+
+        # подгонка размеров изображения под габариты окна,
+        if self.is_current_scale_bigger_than_frame() is True:
+            # если картинка растянута по ширине более, чем окно
+            if self.current_img_width / self.current_img_height > self.main.frame_ratio():
+                self.ratio = self.main.frame_resolution_width / self.current_img_width
+                self.current_img_width = self.main.frame_resolution_width
+                self.current_img_height = self.current_img_height * self.ratio
+
+            # если картинка растянута по высоте более, чем окно
+            else:
+                self.ratio = self.main.frame_resolution_height / self.current_img_height
+                self.current_img_height = self.main.frame_resolution_height
+                self.current_img_width = self.current_img_width * self.ratio
+
+        if scale != 1.0:  # если применяется масштаб
+            self.current_img_width *= scale
+            self.current_img_height *= scale
+            self.current_scale = scale
+            self.ratio *= scale
+            if self.is_magnified is False:
+                self.is_scaled = True
+
+        if scale == self.scale_default:  # если масштаб не применяется
+            self.is_scaled = False
+            self.is_magnified = False
+            self.current_scale = self.scale_default
+
+        self.img_item.setPixmap(
+                self.current_pixmap.scaled(self.current_img_width,
+                                           self.current_img_height,
+                                           Qt.KeepAspectRatio,
+                                           Qt.SmoothTransformation
+                                           )
+        )
+
+        self.rotate_widget(0)
+
+        if SHOW_SHORT_INFO == 'Yes':
+            self.main.short_info.update()
+
+        self.main.miniatures_handler.highlight()
+        self.main.change_title(os.path.split(self.main.current_image)[1])
+
+    def set_img_center(self):
+        hscroll_min = self.horizontalScrollBar().minimum()
+        hscroll_max = self.horizontalScrollBar().maximum() - \
+                      hscroll_min
+        vscroll_min = self.verticalScrollBar().minimum()
+        vscroll_max = self.verticalScrollBar().maximum() - \
+                      vscroll_min
+        self.horizontalScrollBar().setValue(hscroll_min + hscroll_max / 2)
+        self.verticalScrollBar().setValue(vscroll_min + vscroll_max / 2)
+
+    def rotate_widget(self, degree):
+        """
+        Вращает центральное изображение на degree градусов
+        """
+        self.rotation += degree
+        # сброс счётчика при полном повороте
+        if self.rotation >= 360 or self.rotation <= -360:
+            self.rotation = 0
+            return
+
+        # работа объекта-трансформатора
+        self.transform.rotate(self.rotation)
+        self.transform.translate(-self.current_img_width / 2, -self.current_img_height / 2)
+        self.img_item.setTransform(self.transform)
+
+        scene_width, scene_height = self.compute_scene()
+
+        self.setSceneRect(-scene_width / 2,
+                          -scene_height / 2,
+                          scene_width,
+                          scene_height
+                          )
+
+        self.transform.reset()
+
+    def compute_scene(self):
+        """
+        Расчёт размера сцены
+        """
+        flip = False
+        angle = math.fabs(self.rotation)
+
+        if angle == 0 or angle == 180:
+            scene_width = self.current_img_width
+            scene_height = self.current_img_height
+
+        elif angle == 90 or angle == 270:
+            scene_width = self.current_img_height
+            scene_height = self.current_img_width
+
+        else:
+            # для зеркального решения
+            if angle > 180:
+                angle -= 180
+
+            if angle > 90:
+                angle -= 90
+                flip = True
+
+            radians = math.radians(angle)
+
+            width_a = self.current_img_height * math.sin(radians)
+            width_b = self.current_img_width * math.cos(radians)
+
+            height_a = self.current_img_width * math.sin(radians)
+            height_b = self.current_img_height * math.cos(radians)
+
+            scene_width = width_a + width_b
+            scene_height = height_a + height_b
+
+            if flip is True:
+                scene_width, scene_height = scene_height, scene_width
+
+        return scene_width, scene_height
+
+    def check_pixmap(self, pixmap):
+        """
+        Проверка возможности открытия картинки
+        Возвращает True, если картинку открыть можно
+        Возвращает False, если открыть картинку не получится
+        """
+        if pixmap.isNull() is True:
+            print('mopyqtiv: ошибка открытия изображения {0}'.format(pixmap.path),
+                  '\nmopyqtiv: попытка открыть следующее изображение'
+                  )
+            # если открыть не удаётся, тут же пробует открыть следующее изображение
+            self.main.next_image()
+            # если битое изображение не поменялось, значит картинок больше нет
+            if pixmap.path == self.main.current_image:
+                print('mopyqtiv: не удаётся найти изображения в папке')
+                sys.exit(0)
+
+            # удаление файла нечитаемой картинки из списка изображений текущей папки
+            try:
+                self.main.filer.files.remove(pixmap.path)
+            except ValueError:
+                pass
+
+            return False
+        else:
+            return True
+
+    def full_size_image_scale(self):
+        """
+        Возвращает значение масштаба изображения для текущего размера окна,
+        при котором картинка примет масштаб 1:1 с сохранением попорций
+        """
+        coefficient_x = 0
+        coefficient_y = 0
+
+        if self.current_pixmap.width() > self.main.frame_resolution_width:
+            coefficient_x = self.current_pixmap.width() / self.main.frame_resolution_width
+        if self.current_pixmap.height() > self.main.frame_resolution_height:
+            coefficient_y = self.current_pixmap.height() / self.main.frame_resolution_height
+
+        return max(coefficient_x, coefficient_y)
+
+    def is_current_scale_bigger_than_frame(self):
+        """
+        Возвращает True, если хотя бы одна из сторон изображения
+        больше, чем текущий размер окна, False, если размер изображения
+        полностью помещается в текущие габариты окна
+        """
+        if self.current_img_width > self.main.frame_resolution_width \
+                or self.current_img_height > self.main.frame_resolution_height:
+            return True
+        else:
+            return False
+
+    def reset_view(self):
+        """
+        Сброс изменений при просмотре
+        """
+        self.rotation = 0
+        self.set_image(self.main.current_image,
+                       self.scale_default
+                       )
+
+    def set_image_full_size(self):
+        """
+        Устанавливает размер текущего изображения до 1:1
+        """
+        scale = self.full_size_image_scale()
+        self.set_image(self.main.current_image, scale)
+
+    def increase_in_size(self, ier=1):
+        """
+        Увеличивает размер текущего изображения
+        на один шаг, равный SCALE_STEP
+        """
+        if self.current_scale < 10:
+            self.current_scale += SCALE_STEP * ier
+            self.set_image(self.main.current_image, self.current_scale)
+
+        else:
+            return
+
+    def scale_back(self, ier=1):
+        """
+        Уменьшает размер текущего изображения
+        на один шаг, равный SCALE_STEP
+        """
+        if self.current_scale > 0.5:
+            self.current_scale -= SCALE_STEP * ier
+
+            if self.current_scale < 0.5:
+                self.current_scale = 0.5
+
+            self.set_image(self.main.current_image, self.current_scale)
+
+        else:
+            return
+
+    def magnifier(self):
+        """
+        Режим «Лупа»
+        Масштаб зависит от глобальной переменной SCALE_MAGNIFIER
+        """
+        self.is_scaled = False
+        self.is_magnified = True
+        self.set_image(self.main.current_image, SCALE_MAGNIFIER)
+        self.magnifier_move()
+
+    def magnifier_move(self):
+        """
+        Обработка перемещения в режиме «лупа»
+        """
+        hscroll_min = self.horizontalScrollBar().minimum()
+        hscroll_max = self.horizontalScrollBar().maximum() - \
+                      hscroll_min
+        vscroll_min = self.verticalScrollBar().minimum()
+        vscroll_max = self.verticalScrollBar().maximum() - \
+                      vscroll_min
+
+        scroll_step_x = hscroll_max / 100
+        scroll_step_y = vscroll_max / 100
+        mouse_step_x = self.main.frame_resolution_width / 100 / \
+                       MAGNIFIER_MOVE_BOOST
+        mouse_step_y = self.main.frame_resolution_height / 100 / \
+                       MAGNIFIER_MOVE_BOOST
+        step_x = QCursor.pos().x() / mouse_step_x
+        step_y = QCursor.pos().y() / mouse_step_y
+
+        self.horizontalScrollBar().setValue(hscroll_min + step_x * scroll_step_x)
+        self.verticalScrollBar().setValue(vscroll_min + step_y * scroll_step_y)
+
+    def arrows_scale_move(self, direction):
+        """
+        Обрабатывает перемещение картинки: Ctrl + стрелки
+        Только в режиме увеличения
+        """
+        if self.is_scaled is False:
+            return
+
+        # горизонталь
+        hscroll_cur = self.horizontalScrollBar().value()
+        hscroll_min = self.horizontalScrollBar().minimum()
+        hscroll_max = self.horizontalScrollBar().maximum() - \
+                      hscroll_min
+        hscroll_step = hscroll_max / 200
+
+        # вертикаль
+        vscroll_cur = self.verticalScrollBar().value()
+        vscroll_min = self.verticalScrollBar().minimum()
+        vscroll_max = self.verticalScrollBar().maximum() - \
+                      vscroll_min
+        vscroll_step = vscroll_max / 200
+
+        h_key_press_steps = 100 / (self.compute_scene()[0] /
+                                   self.main.frame_resolution_width
+                                   )
+        v_key_press_steps = 100 / (self.compute_scene()[1] /
+                                   self.main.frame_resolution_height
+                                   )
+
+        if direction == 'Up':
+            self.verticalScrollBar().setValue(
+                    vscroll_cur - (v_key_press_steps * vscroll_step)
+            )
+
+        elif direction == 'Down':
+            self.verticalScrollBar().setValue(
+                    vscroll_cur + (v_key_press_steps * vscroll_step)
+            )
+
+        elif direction == 'Right':
+            self.horizontalScrollBar().setValue(
+                    hscroll_cur + (h_key_press_steps * hscroll_step)
+            )
+
+        elif direction == 'Left':
+            self.horizontalScrollBar().setValue(
+                    hscroll_cur - (h_key_press_steps * hscroll_step)
+            )
+
+    def context_menu(self, point):
+        """
+        Вызвает выпадающее меню
+        """
+        self.main.popup.file = self.main.current_image
+        self.main.popup.exec_(QCursor.pos())
+
+    def mousePressEvent(self, event):
+        """
+        Обработка нажатий кнопок мыши
+        """
+        # обработка щелчка левой кнопки мыши
+        if event.button() == Qt.LeftButton:
+            self.lb_held = True
+            # запуск режима лупы
+            if self.is_scaled is not True \
+                    or self.is_current_scale_bigger_than_frame() is False:
+                self.setDragMode(QGraphicsView.NoDrag)
+                self.magnifier()
+                self.main.try_hand_cursor(event)
+
+            # обработка перемещения увеличенного изображения
+            if self.is_scaled is True:
+                self.setDragMode(QGraphicsView.ScrollHandDrag)
+                self.main.try_hand_cursor(event)
+                QGraphicsView.mousePressEvent(self, event)
+
+        # установка изображения в полный размер при нажатии на колёсико
+        if event.button() == Qt.MiddleButton:
+            # если изображение способно к увеличению в полный размер
+            if self.is_scaled is False \
+                    and self.full_size_image_scale() > 1.0:
+                self.setDragMode(QGraphicsView.ScrollHandDrag)
+                self.set_image_full_size()
+                self.set_img_center()
+                self.main.try_hand_cursor(event)
+
+            # обработка выхода из режима увеличения
+            elif self.is_scaled is True:
+                self.setDragMode(QGraphicsView.NoDrag)
+                self.is_scaled = False
+                self.set_image(self.main.current_image, self.scale_default)
+                self.set_img_center()
+                self.main.try_hand_cursor(event)
+
+            # если изображение неспособно к полному размеру - ничего не делать
+            else:
+                return
+
+        # обработка щелчка правой кнопки мыши
+        if event.button() == Qt.RightButton:
+            self.rb_held = True
+
+    def mouseMoveEvent(self, event):
+        """
+        Обработка событий перемещения картинки в режиме «лупа»
+        """
+        if self.is_magnified is True:
+            self.magnifier_move()
+
+        elif self.is_scaled is True:
+            QGraphicsView.mouseMoveEvent(self, event)
+
+        # появление панели миниатюр в зависимости от положения курсора мыши
+        if qApp.mouseButtons() != Qt.LeftButton:
+            # 20 - кол-во пикселей от правого края,
+            # заходя за которые курсором мыши, появится панель миниатюр
+            if QCursor.pos().x() > self.main.pos().x() + \
+                    self.main.frame_resolution_width - 20:
+                self.main.miniatures_scroller.show()
+                self.main.miniatures_scroller.follow_view()
+            if QCursor.pos().x() < self.main.pos().x() + \
+                    self.main.frame_resolution_width - \
+                    self.main.miniature_current_width:
+                self.main.miniatures_scroller.hide()
+
+    def mouseReleaseEvent(self, event):
+        """
+        Обработка снятия щелчка кнопок мыши
+        """
+        # сброс комбинации
+        self.lb_held = False
+        self.rb_held = False
+
+        if event.button() == Qt.LeftButton:
+            if self.is_scaled is True:
+                self.setDragMode(QGraphicsView.NoDrag)
+                self.main.try_hand_cursor(event)
+
+            elif self.is_magnified is True:
+                self.set_image(self.main.current_image,
+                               self.scale_default
+                               )
+                self.set_img_center()
+                self.main.try_hand_cursor(event)
+
+        if event.button() == Qt.RightButton:
+            if self.rb_combined is True:
+                pass
+
+            elif self.rb_combined is False:
+                self.context_menu(QCursor.pos())
+        self.rb_combined = False
+
+    def wheelEvent(self, event):
+        """
+        eventFilter для колесика мыши
+        """
+        return
+
+
+class MainWindow(QWidget):
+    """
+    Виджет главного окна
+    Связующий класс
+    """
+
+    def __init__(self, start_image):
+        super().__init__()
+
+        self.binds = []
+        self.is_image_altered = False
+        self.current_image = os.path.abspath(start_image)
+        self.last_image = self.current_image
+        self.program_icon = QIcon.fromTheme('pixelart-trace')
+        self.trash_path = os.path.expanduser('~') + '/.local/share/Trash'
+        self.miniature_current_width = MINIATURE_WIDTH
+        self.screen_resolution = QApplication.desktop().screenGeometry()
+
+        # для корректировки размера миниатюр
+        self.coefficient = 1.0
+
+        # размер рабочей области
+        self.frame_resolution_width = self.screen_resolution.width()
+        self.frame_resolution_height = self.screen_resolution.height()
+
+        # доступные клавиши для привязывания сортировочных папок
+        self.keys_for_bindings = (Qt.Key_Z, Qt.Key_X, Qt.Key_C, Qt.Key_V, Qt.Key_B,
+                                  Qt.Key_N, Qt.Key_M, Qt.Key_A, Qt.Key_S, Qt.Key_D,
+                                  Qt.Key_F, Qt.Key_G, Qt.Key_H, Qt.Key_J, Qt.Key_K,
+                                  Qt.Key_W, Qt.Key_E, Qt.Key_T, Qt.Key_Y, Qt.Key_U,
+                                  Qt.Key_I, Qt.Key_O, Qt.Key_P)
+
+        # включает режим отслеживания положения мыши
+        self.setMouseTracking(True)
+
+        # настройка главного окна
+        self.main_palette = QPalette()  # палитра главного окна
+        self.setAutoFillBackground(True)  # позволяет установить фон QWidget
+        self.background_color = QColor()
+        self.background_color.setNamedColor(BACKGROUND_COLOR)
+        self.set_background(self.background_color)
+        self.change_title(os.path.split(start_image)[1])
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        # раскрывает главное окно на весь экран
+        self.move(0, 0)
+        self.resize(self.frame_resolution_width, self.frame_resolution_height)
+
+        # установка иконки приложения
+        self.setWindowIcon(self.program_icon)
+
+        # главное окно без рамки
+        if WITHOUT_BORDER == 'Yes':
+            self.setWindowFlags(Qt.FramelessWindowHint)
+
+        # создание экземпляров классов
+        self.filer = Filer(start_image)
+        self.info = InfoLabel(self)
+        self.popup = PopupMenu(self)
+        self.short_info = ShortInfo(self)
+        self.imageviewer = ImageViewer(self)
+        self.turner_thread = TurnerThread(self)
+        self.miniatures_area = MiniaturesArea(self)
+        self.miniatures_handler = MiniaturesHandler(self)
+        self.miniatures_scroller = MiniaturesScroller(self)
+
+        # настройка области прокрутки панели миниатюр
+        self.miniatures_scroller.focusNextPrevChild(True)
+        self.miniatures_scroller.hide()
+
+        # создаёт список картинок из текущей папки
+        self.filer.list_folder(self.filer.current_folder)
+
+        # создание и установка миниатюр
+        self.miniatures_handler.set_miniatures()
+        self.turner_thread.finished.connect(self.turn_finished)
+
+        # регистрация чистого выхода
+        atexit.register(self.at_close)
+
+    def frame_ratio(self):
+        """
+        Возвращает коэффициент отношения сторон текущего окна
+        """
+        return self.frame_resolution_width / self.frame_resolution_height
+
+    def set_background(self, color):
+        """
+        Установка фона главного окна
+        """
+        self.main_palette.setColor(QPalette.Background, color)
+        self.setPalette(self.main_palette)
+
+    def change_title(self, name):
+        """
+        Изменяет заголовок окна
+        """
+        self.setWindowTitle('Mouse oriented PyQt5 image viewer: {0}'.format(name))
+
+    def trash(self, file_path):
+        """
+        Отправляет указанную картинку в корзину
+        """
+        if os.path.isdir(self.trash_path):
+
+            # при переносе в корзину текущего изображения
+            if file_path == self.current_image:
+                if file_path == self.filer.files[-1]:
+                    self.previous_image()
+
+                else:
+                    self.next_image()
+
+            if file_path in self.filer.files:
+                for_delete_file_name = os.path.split(file_path)[1]
+
+                # перемещение файла в корзину
+                destination = self.trash_path + '/files/' + for_delete_file_name
+                shutil.move(file_path, destination)
+
+                # создание файла описания удалённого файла
+                date = time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(time.time()))
+                info_file = self.trash_path + '/info/' + for_delete_file_name + '.trashinfo'
+                info = '[Trash Info]\nPath={0}\nDeletionDate={1}\n'.format(file_path, date)
+                with open(info_file, 'w') as info_file:
+                    info_file.write(info)
+
+                # удаление файла картинки из списка изображений текущей папки
+                self.filer.files.remove(file_path)
+
+                if len(self.filer.files) == 0:
+                    print('mopyqtiv: изображений в папке больше нет')
+                    sys.exit(0)
+
+                # удаление его миниатюры
+                self.miniatures_handler.purge_miniature(file_path)
+
+                self.info.show_hint('<font color="#00ff00">Файл «<font color="#ffff00">'
+                                    '{0}</font>» перемещен в корзину</font>'.format(
+                        for_delete_file_name)
+                )
+
+    def update_current_image(self, image_path):
+        """
+        Обновляет текущую/предыдущую картинки
+        """
+        if self.current_image in self.filer.files:
+            self.last_image = self.current_image
+
+        else:
+            self.last_image = self.filer.files[0]
+
+        self.current_image = image_path
+
+    def next_image(self, ier=1):
+        """
+        Установка следующего в списке изображения
+        """
+        len_img_list = len(self.filer.files)
+        # если изображение в папке нет -> выход
+        if len_img_list == 0:
+            print('mopyqtiv: не удаётся найти изображения в папке')
+            sys.exit(0)
+
+        elif self.current_image in self.filer.files:
+            current_index = self.filer.files.index(self.current_image)
+
+        else:
+            try:
+                current_index = self.filer.files.index(self.last_image)
+            # если файл отсутствует в списке изображений, пробует открыть последнее
+            except ValueError:
+                current_index = -1
+
+        # если всё нормально -> следующее изображение
+        if current_index <= len_img_list - 2:
+            new_index = current_index + ier
+
+            if new_index > len_img_list - 2:
+                new_index = -1
+
+            self.update_current_image(self.filer.files[new_index])
+            self.imageviewer.set_image(self.current_image,
+                                       self.imageviewer.scale_default
+                                       )
+        else:
+            return
+
+    def previous_image(self, ier=1):
+        """
+        Установка предыдующего в списке изображения
+        """
+        len_img_list = len(self.filer.files)
+        # если изображение в папке нет -> выход
+        if len_img_list == 0:
+            print('mopyqtiv: не удаётся найти изображения в папке')
+            sys.exit(0)
+
+        elif len_img_list == 1:
+            return
+
+        if self.current_image in self.filer.files:
+            current_index = self.filer.files.index(self.current_image)
+            # если файл отсутствует в списке изображений -> выход
+        else:
+            try:
+                current_index = self.filer.files.index(self.last_image)
+            except ValueError:
+                current_index = 0
+
+        # если всё нормально -> предыдующее изображение
+        if current_index > 0:
+            new_index = current_index - ier
+
+            if new_index < 1:
+                new_index = 0
+
+            self.update_current_image(self.filer.files[new_index])
+            self.imageviewer.set_image(self.current_image,
+                                       self.imageviewer.scale_default
+                                       )
+        else:
+            return
+
+    def turn_image(self, image_path, degree):
+        """
+        Поворачивает изображение image_path
+        в зависимости от параметра degree
+        """
+        folder = self.miniatures_handler.miniatures_folder_handler.folder
+        self.turner_thread.args = (image_path, degree, folder)
+        self.turner_thread.start()
+
+    def turn_finished(self):
+        """
+        Выполняется после завершения поворота изображения
+        """
+        if self.turner_thread.error is True:
+            self.info.show_hint('<font color="#ff0000">Не удалось повернуть изображение. '
+                                'Возможно, у Вас недостаточно прав на файл</font>')
+            return
+
+        self.imageviewer.set_image(self.current_image,
+                                   self.imageviewer.scale_default
+                                   )
+
+    def turn_right(self, image_path):
+        """
+        Вращает изобажение image_path и его миниатюру вправо
+        """
+        self.is_image_altered = True
+        self.turn_image(image_path, -90)
+
+    def turn_left(self, image_path):
+        """
+        Вращает изобажение image_path и его миниатюру влево
+        """
+        self.is_image_altered = True
+        self.turn_image(image_path, 90)
+
+    def choose_file(self):
+        """
+        Запускает диалог выбора изображения
+        """
+        # прерывание создания миниатюр
+        STOP_FLAG.value = 1
+        file_path = self.filer.choose_file()
+        if file_path == '':
+            return
+
+        self.filer.current_folder = os.path.split(file_path)[0]
+        self.filer.list_folder(self.filer.current_folder)
+        self.update_current_image(file_path)
+        self.imageviewer.set_image(file_path, self.imageviewer.scale_default)
+        self.miniatures_handler.purge_all_miniatures()
+        self.miniatures_handler.set_miniatures()
+
+    def try_hand_cursor(self, event):
+        """
+        Меняет указатель мыши стрелку на руку,
+        если картинка больше габаритов окна, и наоборот
+        """
+        # в режиме «лупа»
+        if self.imageviewer.is_magnified is True:
+            self.setCursor(Qt.BlankCursor)
+            return
+
+        # в режиме перетаскивания
+        if self.imageviewer.is_current_scale_bigger_than_frame() is True \
+                and self.imageviewer.lb_held is True:
+            self.setCursor(Qt.ClosedHandCursor)
+            return
+
+        # в режиме готовности к перетаскиванию
+        if self.imageviewer.is_current_scale_bigger_than_frame() is True \
+                and self.imageviewer.lb_held is False:
+            self.setCursor(Qt.OpenHandCursor)
+            return
+
+        # во всех остальных случаях
+        else:
+            self.setCursor(Qt.ArrowCursor)
+
+    def bind_key(self, key):
+        """
+        Привязывает на клавишу путь до папки (выбирается через диалог)
+        """
+        bind = Bind()
+        bind.key = key()
+        bind.path = self.filer.choose_folder()
+
+        if bind.path == '':
+            return
+
+        else:
+            self.binds.append(bind)
+            self.info.show_hint(
+                    '<font color="#00ff00">Клавиша привязана к «<font color="#ffff00">'
+                    '{0}</font>»</font>'.format(
+                            bind.path
+                    )
+            )
+
+    def unbind_key(self, key):
+        """
+        Отвязывает папку от клавиши
+        """
+        for bind in self.binds:
+            if bind.key == key():
+                self.binds.remove(bind)
+                self.info.show_hint('<font color="#00ff00">Клавиша освобождена</font>')
+                break
+
+    def work_bind(self, event):
+        """
+        Обрабатывает привязку папок на клавиши,
+        а также перемещение изображений
+        """
+        for bind in self.binds:
+            if event.key() == bind.key:
+                path_for_action = self.current_image
+
+                if COPY_ON_SORTING == 'No':
+                    if self.current_image == self.filer.files[-1]:
+                        self.previous_image()
+
+                    else:
+                        self.next_image()
+
+                    self.filer.files.remove(path_for_action)
+                    self.miniatures_handler.purge_miniature(path_for_action)
+                    message = 'перемещён'
+
+                else:
+                    message = 'скопирован'
+
+                bind.action(path_for_action)
+
+                if len(self.filer.files) == 0:
+                    print('mopyqtiv: изображений в папке больше нет')
+                    sys.exit(0)
+
+                # уведомление о перемещении
+                file_name = os.path.split(path_for_action)[1]
+                self.info.show_hint(
+                        '<font color="#00ff00">Файл «<font color="#ffff00">'
+                        '{0}</font>' '» {1} в «<font color="#ffff00">'
+                        '{2}</font>»</font>'.format(file_name,
+                                                    message,
+                                                    bind.path
+                                                    )
+                )
+
+                return
+
+        # иначе создаём связку
+        self.bind_key(event.key)
+
+    def keyPressEvent(self, event):
+        """
+        Обработка нажатий клавиш клавиатуры
+        """
+        # свободные нажатия
+        if event.modifiers() == Qt.NoModifier:
+            # обработчик сортировки по горячим клавишам
+            if event.key() in self.keys_for_bindings:
+                self.work_bind(event)
+
+            # сброс изменений при просмотре
+            elif event.key() == Qt.Key_Space:
+                self.imageviewer.reset_view()
+                self.try_hand_cursor(event)
+
+            # изменения масштаба клавиатурой
+            elif event.key() == Qt.Key_PageUp:
+                self.imageviewer.increase_in_size()
+                self.try_hand_cursor(event)
+            elif event.key() == Qt.Key_PageDown:
+                self.imageviewer.scale_back()
+                self.try_hand_cursor(event)
+
+            # удаление текущей картинки
+            elif event.key() == Qt.Key_Delete:
+                self.trash(self.current_image)
+
+            # окно выбора изображения
+            elif event.key() == Qt.Key_Backspace:
+                self.choose_file()
+
+            # выход из программы
+            elif event.key() == Qt.Key_Escape \
+                    or event.key() == Qt.Key_Q:
+                sys.exit(0)
+
+            # обработка нажатий стрелок
+            elif self.imageviewer.is_current_scale_bigger_than_frame() is True:
+                # перемещение стрелками при масштабе
+                if event.key() == Qt.Key_Up:
+                    self.imageviewer.arrows_scale_move('Up')
+                elif event.key() == Qt.Key_Down:
+                    self.imageviewer.arrows_scale_move('Down')
+                elif event.key() == Qt.Key_Right:
+                    self.imageviewer.arrows_scale_move('Right')
+                elif event.key() == Qt.Key_Left:
+                    self.imageviewer.arrows_scale_move('Left')
+
+            elif self.imageviewer.is_current_scale_bigger_than_frame() is False:
+                # листание изображений
+                if event.key() == Qt.Key_Right or event.key() == Qt.Key_Down:
+                    self.next_image()
+                elif event.key() == Qt.Key_Left or event.key() == Qt.Key_Up:
+                    self.previous_image()
+
+        # сочетания с Shift
+        elif event.modifiers() == Qt.ShiftModifier:
+            # вращение изображения
+            if event.key() == Qt.Key_PageDown:
+                self.imageviewer.rotate_widget(ROTATE_STEP)
+            elif event.key() == Qt.Key_PageUp:
+                self.imageviewer.rotate_widget(-ROTATE_STEP)
+
+        # комбинации с Ctrl
+        elif event.modifiers() == Qt.ControlModifier:
+            # поворот изображения
+            if event.key() == Qt.Key_R:
+                self.turn_right(self.current_image)
+            elif event.key() == Qt.Key_L:
+                self.turn_left(self.current_image)
+
+            # отвязка сортировочных клавиш
+            elif event.key() in self.keys_for_bindings:
+                self.unbind_key(event.key)
+
+    def mouseMoveEvent(self, event):
+        """
+        Страховка от потери фокуса для панели миниатюр
+        """
+        self.imageviewer.mouseMoveEvent(event)
+
+    def wheelEvent(self, event):
+        """
+        Настройка комбинаций с колёсиком мыши
+        """
+        if self.miniatures_scroller.isVisible() is True:
+            return
+
+        step = event.angleDelta().y()  # -120 колёсико на себя, 120 - от себя
+        ier = int(math.fabs(step) / 120)
+
+        # регулировка масштаба + Ctrl
+        if event.modifiers() == Qt.ControlModifier or \
+                        self.imageviewer.rb_held is True:
+            if step > 0:
+                self.imageviewer.increase_in_size(ier)
+            elif step < 0:
+                self.imageviewer.scale_back(ier)
+            self.imageviewer.rb_combined = True
+            self.try_hand_cursor(event)
+            return
+
+        # вращение изображения + ShiftModifier
+        elif event.modifiers() == Qt.ShiftModifier or \
+                        self.imageviewer.lb_held is True:
+            if step > 0:
+                self.imageviewer.rotate_widget(-ROTATE_STEP * ier)
+            elif step < 0:
+                self.imageviewer.rotate_widget(ROTATE_STEP * ier)
+            self.try_hand_cursor(event)
+            return
+
+        # если модификаторов не зажато -> смена картинки
+        else:
+            if step > 0:
+                self.previous_image(ier)
+            else:
+                self.next_image(ier)
+            # восстановление курсора
+            self.setCursor(Qt.ArrowCursor)
+
+    def resizeEvent(self, event):
+        """
+        Срабатывает при изменении размера окна
+        """
+        # настройка основной картинки
+        self.frame_resolution_width = self.frameSize().width()
+        self.frame_resolution_height = self.frameSize().height()
+
+        #  подготовка центрального виджета
+        self.imageviewer.move(0, 0)
+        self.imageviewer.resize(
+                self.frame_resolution_width,
+                self.frame_resolution_height
+        )
+        self.imageviewer.set_image(self.current_image, self.imageviewer.scale_default)
+
+        # настройка размера и положения миниатюр
+        self.coefficient = self.frameSize().width() / self.screen_resolution.width()
+        self.miniature_current_width = self.coefficient * MINIATURE_WIDTH
+        self.miniatures_handler.resize_miniatures(self.coefficient)
+        self.miniatures_scroller.move(
+                self.frame_resolution_width -
+                (self.miniature_current_width + 36), 0
+        )
+
+        # 36: компенсатор размера прокрутки
+        self.miniatures_scroller.resize(self.miniature_current_width + 36,
+                                        self.frame_resolution_height
+                                        )
+
+    def closeEvent(self, event):
+        """
+        Чистый выход
+        """
+        self.at_close()
+
+    def at_close(self):
+        """
+        Очистка временной папки с миниатюрами при выходе
+        """
+        self.info.hide()
+        self.short_info.hide()
+        self.miniatures_handler.miniatures_folder_handler.remove_miniatures_folder()
+
+
+def read_settings():
+    global WITHOUT_BORDER, HINT_TIME, SCALE_STEP, \
+        ROTATE_STEP, SCALE_MAGNIFIER, MAGNIFIER_MOVE_BOOST, \
+        SCALE_MAGNIFIER, MAGNIFIER_MOVE_BOOST, MINIATURE_WIDTH, \
+        BACKGROUND_COLOR, COPY_ON_SORTING, USE_OPENGL, SHOW_SHORT_INFO
+
+
+    WITHOUT_BORDER = 'Yes'
+    HINT_TIME = 2.5
+    SCALE_STEP = 0.8
+    ROTATE_STEP = 5.0
+    SCALE_MAGNIFIER = 2.5
+    MAGNIFIER_MOVE_BOOST = 1.7
+    MINIATURE_WIDTH = 250
+    BACKGROUND_COLOR = '#000000'
+    SHOW_SHORT_INFO = 'Yes'
+    COPY_ON_SORTING = 'No'
+    USE_OPENGL = 'No'
+
+
+def mopyqtiv_help():
+    print('\nmopyqtiv - программа для просмотра изображений, написанная на python,'
+          '\nс использованием библиотек PyQt пятой серии и PIL.'
+          '\nДля подробной справки:'
+          '\n\tman mopyqtiv'
+          '\n\nИспользование:'
+          '\n\tmopyqtiv [-h] [файл]'
+          '\n\t-h\tключ для показа этого сообщения'
+          '\n\tфайл\tпрограмма может открыть изображения следующих форматов:'
+          '\n\t\t*.bmp *.pbm *.pgm *.ppm *.xbm *.xpm *.jpg *.jpeg *.png *.gif')
+
+
+if __name__ == '__main__':
+    if os.name == 'nt':
+        print('Программа предназначена для операционной системы Linux.')
+        sys.exit(0)
+
+    elif '-h' in sys.argv:
+        mopyqtiv_help()
+        sys.exit(0)
+
+    elif len(sys.argv) > 2 or len(sys.argv) < 2:
+        print('Для запуска приложения mopyqtiv укажите открываемое изображение.',
+              '\nДля справки запустите с параметром -h')
+        sys.exit(0)
+
+    else:
+        read_settings()
+        STOP_FLAG = Value('i', 0)
+        first, second = Pipe(duplex=True)
+        app = QApplication(sys.argv)
+        mainwindow = MainWindow(sys.argv[1])
+        mainwindow.show()
+        sys.exit(app.exec_())
