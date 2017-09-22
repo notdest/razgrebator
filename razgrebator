@@ -1,33 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os  # операции с файлами
-import sys  # аргументы командной строки
-import time  # для меток удаляемых файлов
-import math  # для расчёта размеров графической сцены
-import shutil  # для удаления файлов
+import os , sys , time , math , shutil 
 import atexit  # для удаления временных файлов при выходе
-import hashlib  # для рандомных имён временных папок
-
-from configparser import ConfigParser  # чтение настроек
 
 from PIL import Image
 from multiprocessing import Pool, Pipe, Process, Value
 
-from PyQt5.QtGui import (QIcon, QPalette, QColor,
-                         QFont, QPixmap, QCursor,
-                         QTransform, QBrush
-                         )
+from PyQt5.QtGui import (QIcon, QPalette, QColor, QFont, QPixmap, QCursor, QTransform, QBrush, QMouseEvent)
 
-from PyQt5.QtWidgets import (QWidget, QMenu, QLabel, QScrollArea,
-                             QApplication, QFileDialog, QAction,QStyleFactory,
-                             QVBoxLayout, QLayout, QInputDialog, qApp,
-                             QGraphicsPixmapItem, QGraphicsScene,
-                             QGraphicsView, QGraphicsDropShadowEffect
-                             )
+from PyQt5.QtWidgets import (QWidget, QMenu, QLabel, QScrollArea, QApplication, QFileDialog, QAction,
+                             QVBoxLayout, QLayout, QInputDialog, qApp, QGraphicsPixmapItem, QGraphicsScene,
+                             QGraphicsView, QGraphicsDropShadowEffect )
 
-from PyQt5.QtCore import (Qt, QThread, QFileInfo, QTimer,
-                          pyqtSignal, pyqtSlot, QObject)
+from PyQt5.QtCore import (Qt, QThread, QFileInfo, QTimer, pyqtSignal, pyqtSlot, QObject,QEvent)
 
 from PyQt5.QtOpenGL import QGLWidget
 
@@ -209,6 +195,14 @@ class PopupMenu(QMenu):
         self.file = ''
 
         # описание действий
+
+        ripper_action = QAction(
+                QIcon.fromTheme('edit-cut'),
+                'Распотрошить',
+                self
+        )
+
+
         info_action = QAction(
                 QIcon.fromTheme('exifinfo'),
                 'Информация',
@@ -251,6 +245,7 @@ class PopupMenu(QMenu):
                 self
         )
 
+        ripper_action.triggered.connect(self.main.enable_ripper)
         info_action.triggered.connect(self.show_info)
         choose_action.triggered.connect(self.main.choose_file)
         rename_action.triggered.connect(self.rename_img)
@@ -260,6 +255,7 @@ class PopupMenu(QMenu):
         exit_action.triggered.connect(sys.exit)
 
         # сборка выпадающего меню
+        self.addAction(ripper_action)
         self.addAction(info_action)
         self.addAction(choose_action)
         self.addAction(rename_action)
@@ -448,6 +444,7 @@ class ImageViewer(QGraphicsView):
 
         # для комбинаций кнопок мыши
         self.lb_held = False
+        self.mb_held = False
         self.rb_held = False
         self.rb_combined = False
 
@@ -532,6 +529,7 @@ class ImageViewer(QGraphicsView):
     def rotate_widget(self, degree):
         """
         Вращает центральное изображение на degree градусов
+        Сложно вырезать, иначе начинаются траблы с отображением
         """
         self.rotation += degree
         # сброс счётчика при полном повороте
@@ -692,39 +690,6 @@ class ImageViewer(QGraphicsView):
         else:
             return
 
-    def magnifier(self):
-        """
-        Режим «Лупа»
-        Масштаб зависит от глобальной переменной SCALE_MAGNIFIER
-        """
-        self.is_scaled = False
-        self.is_magnified = True
-        self.set_image(self.main.current_image, SCALE_MAGNIFIER)
-        self.magnifier_move()
-
-    def magnifier_move(self):
-        """
-        Обработка перемещения в режиме «лупа»
-        """
-        hscroll_min = self.horizontalScrollBar().minimum()
-        hscroll_max = self.horizontalScrollBar().maximum() - \
-                      hscroll_min
-        vscroll_min = self.verticalScrollBar().minimum()
-        vscroll_max = self.verticalScrollBar().maximum() - \
-                      vscroll_min
-
-        scroll_step_x = hscroll_max / 100
-        scroll_step_y = vscroll_max / 100
-        mouse_step_x = self.main.frame_resolution_width / 100 / \
-                       MAGNIFIER_MOVE_BOOST
-        mouse_step_y = self.main.frame_resolution_height / 100 / \
-                       MAGNIFIER_MOVE_BOOST
-        step_x = QCursor.pos().x() / mouse_step_x
-        step_y = QCursor.pos().y() / mouse_step_y
-
-        self.horizontalScrollBar().setValue(hscroll_min + step_x * scroll_step_x)
-        self.verticalScrollBar().setValue(vscroll_min + step_y * scroll_step_y)
-
     def arrows_scale_move(self, direction):
         """
         Обрабатывает перемещение картинки: Ctrl + стрелки
@@ -786,42 +751,26 @@ class ImageViewer(QGraphicsView):
         Обработка нажатий кнопок мыши
         """
         # обработка щелчка левой кнопки мыши
-        if event.button() == Qt.LeftButton:
+        if event.button() ==  Qt.LeftButton:
             self.lb_held = True
-            # запуск режима лупы
-            if self.is_scaled is not True \
-                    or self.is_current_scale_bigger_than_frame() is False:
-                self.setDragMode(QGraphicsView.NoDrag)
-                self.magnifier()
-                self.main.try_hand_cursor(event)
-
             # обработка перемещения увеличенного изображения
-            if self.is_scaled is True:
-                self.setDragMode(QGraphicsView.ScrollHandDrag)
-                self.main.try_hand_cursor(event)
-                QGraphicsView.mousePressEvent(self, event)
+
 
         # установка изображения в полный размер при нажатии на колёсико
         if event.button() == Qt.MiddleButton:
-            # если изображение способно к увеличению в полный размер
-            if self.is_scaled is False \
-                    and self.full_size_image_scale() > 1.0:
+            self.mb_held = True
+            # обработка перемещения увеличенного изображения
+            if self.current_scale > 1:
                 self.setDragMode(QGraphicsView.ScrollHandDrag)
-                self.set_image_full_size()
-                self.set_img_center()
-                self.main.try_hand_cursor(event)
+                fakeEvent   = QMouseEvent(
+                    QEvent.MouseButtonPress,
+                    event.pos(),
+                    Qt.LeftButton,
+                    Qt.LeftButton,
+                    Qt.NoModifier
+                    )
+                QGraphicsView.mousePressEvent(self, fakeEvent)
 
-            # обработка выхода из режима увеличения
-            elif self.is_scaled is True:
-                self.setDragMode(QGraphicsView.NoDrag)
-                self.is_scaled = False
-                self.set_image(self.main.current_image, self.scale_default)
-                self.set_img_center()
-                self.main.try_hand_cursor(event)
-
-            # если изображение неспособно к полному размеру - ничего не делать
-            else:
-                return
 
         # обработка щелчка правой кнопки мыши
         if event.button() == Qt.RightButton:
@@ -844,19 +793,16 @@ class ImageViewer(QGraphicsView):
         """
         # сброс комбинации
         self.lb_held = False
+        self.mb_held = False
         self.rb_held = False
 
         if event.button() == Qt.LeftButton:
-            if self.is_scaled is True:
-                self.setDragMode(QGraphicsView.NoDrag)
-                self.main.try_hand_cursor(event)
+            return
 
-            elif self.is_magnified is True:
-                self.set_image(self.main.current_image,
-                               self.scale_default
-                               )
-                self.set_img_center()
-                self.main.try_hand_cursor(event)
+        if event.button() == Qt.MiddleButton:
+            if self.current_scale > 1:
+                self.setDragMode(QGraphicsView.NoDrag) 
+
 
         if event.button() == Qt.RightButton:
             if self.rb_combined is True:
@@ -1101,7 +1047,7 @@ class MainWindow(QWidget):
         Поворачивает изображение image_path
         в зависимости от параметра degree
         """
-        self.turner_thread.args = (image_path, degree, folder)
+        self.turner_thread.args = (image_path, degree)
         self.turner_thread.start()
 
     def turn_finished(self):
@@ -1146,32 +1092,6 @@ class MainWindow(QWidget):
         self.update_current_image(file_path)
         self.imageviewer.set_image(file_path, self.imageviewer.scale_default)
 
-
-    def try_hand_cursor(self, event):
-        """
-        Меняет указатель мыши стрелку на руку,
-        если картинка больше габаритов окна, и наоборот
-        """
-        # в режиме «лупа»
-        if self.imageviewer.is_magnified is True:
-            self.setCursor(Qt.BlankCursor)
-            return
-
-        # в режиме перетаскивания
-        if self.imageviewer.is_current_scale_bigger_than_frame() is True \
-                and self.imageviewer.lb_held is True:
-            self.setCursor(Qt.ClosedHandCursor)
-            return
-
-        # в режиме готовности к перетаскиванию
-        if self.imageviewer.is_current_scale_bigger_than_frame() is True \
-                and self.imageviewer.lb_held is False:
-            self.setCursor(Qt.OpenHandCursor)
-            return
-
-        # во всех остальных случаях
-        else:
-            self.setCursor(Qt.ArrowCursor)
 
     def bind_key(self, key):
         """
@@ -1260,15 +1180,12 @@ class MainWindow(QWidget):
             # сброс изменений при просмотре
             elif event.key() == Qt.Key_Space:
                 self.imageviewer.reset_view()
-                self.try_hand_cursor(event)
 
             # изменения масштаба клавиатурой
             elif event.key() == Qt.Key_PageUp:
                 self.imageviewer.increase_in_size()
-                self.try_hand_cursor(event)
             elif event.key() == Qt.Key_PageDown:
                 self.imageviewer.scale_back()
-                self.try_hand_cursor(event)
 
             # удаление текущей картинки
             elif event.key() == Qt.Key_Delete:
@@ -1302,14 +1219,6 @@ class MainWindow(QWidget):
                 elif event.key() == Qt.Key_Left or event.key() == Qt.Key_Up:
                     self.previous_image()
 
-        # сочетания с Shift
-        elif event.modifiers() == Qt.ShiftModifier:
-            # вращение изображения
-            if event.key() == Qt.Key_PageDown:
-                self.imageviewer.rotate_widget(ROTATE_STEP)
-            elif event.key() == Qt.Key_PageUp:
-                self.imageviewer.rotate_widget(-ROTATE_STEP)
-
         # комбинации с Ctrl
         elif event.modifiers() == Qt.ControlModifier:
             # поворот изображения
@@ -1337,35 +1246,12 @@ class MainWindow(QWidget):
         step = event.angleDelta().y()  # -120 колёсико на себя, 120 - от себя
         ier = int(math.fabs(step) / 120)
 
-        # регулировка масштаба + Ctrl
-        if event.modifiers() == Qt.ControlModifier or \
-                        self.imageviewer.rb_held is True:
-            if step > 0:
-                self.imageviewer.increase_in_size(ier)
-            elif step < 0:
-                self.imageviewer.scale_back(ier)
-            self.imageviewer.rb_combined = True
-            self.try_hand_cursor(event)
-            return
-
-        # вращение изображения + ShiftModifier
-        elif event.modifiers() == Qt.ShiftModifier or \
-                        self.imageviewer.lb_held is True:
-            if step > 0:
-                self.imageviewer.rotate_widget(-ROTATE_STEP * ier)
-            elif step < 0:
-                self.imageviewer.rotate_widget(ROTATE_STEP * ier)
-            self.try_hand_cursor(event)
-            return
-
-        # если модификаторов не зажато -> смена картинки
-        else:
-            if step > 0:
-                self.previous_image(ier)
-            else:
-                self.next_image(ier)
-            # восстановление курсора
-            self.setCursor(Qt.ArrowCursor)
+        # регулировка масштаба 
+        if step > 0:
+            self.imageviewer.increase_in_size(ier)
+        elif step < 0:
+            self.imageviewer.scale_back(ier)
+        self.imageviewer.rb_combined = True
 
     def resizeEvent(self, event):
         """
@@ -1396,6 +1282,18 @@ class MainWindow(QWidget):
         """
         self.info.hide()
         self.short_info.hide()
+
+    def enable_ripper(self):
+        """
+        Запускает режим потрошения картинки на мелкие
+        """
+        self.background_color.setNamedColor('#0000FF')
+        self.set_background(self.background_color)
+        self.imageviewer.brush = QBrush(self.background_color)
+        self.imageviewer.img_scene.setBackgroundBrush(self.imageviewer.brush)
+
+
+        
 
 
 def read_settings():
@@ -1436,3 +1334,4 @@ if __name__ == '__main__':
     mainwindow = MainWindow(start_image)
     mainwindow.show()
     sys.exit(app.exec_())
+#https://stackoverflow.com/questions/13840289/how-to-use-qrubberband-with-qrect-class-in-pyqt
