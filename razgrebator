@@ -7,13 +7,13 @@ import atexit  # для удаления временных файлов при 
 from PIL import Image
 from multiprocessing import Pool, Pipe, Process, Value
 
-from PyQt5.QtGui import (QIcon, QPalette, QColor, QFont, QPixmap, QCursor, QTransform, QBrush, QMouseEvent)
+from PyQt5.QtGui import (QIcon, QPalette, QColor, QFont, QPixmap, QCursor, QTransform, QBrush, QMouseEvent )
 
 from PyQt5.QtWidgets import (QWidget, QMenu, QLabel, QScrollArea, QApplication, QFileDialog, QAction,
                              QVBoxLayout, QLayout, QInputDialog, qApp, QGraphicsPixmapItem, QGraphicsScene,
-                             QGraphicsView, QGraphicsDropShadowEffect )
+                             QGraphicsView, QGraphicsDropShadowEffect,QRubberBand )
 
-from PyQt5.QtCore import (Qt, QThread, QFileInfo, QTimer, pyqtSignal, pyqtSlot, QObject,QEvent)
+from PyQt5.QtCore import (Qt, QThread, QFileInfo, QTimer, pyqtSignal, pyqtSlot, QObject,QEvent, QRect, QSize)
 
 from PyQt5.QtOpenGL import QGLWidget
 
@@ -195,6 +195,11 @@ class PopupMenu(QMenu):
         self.file = ''
 
         # описание действий
+        cancel_action = QAction(
+                QIcon.fromTheme('edit-undo'),
+                'Отменить',
+                self
+        )
 
         ripper_action = QAction(
                 QIcon.fromTheme('edit-cut'),
@@ -245,6 +250,7 @@ class PopupMenu(QMenu):
                 self
         )
 
+        cancel_action.triggered.connect(self.delete_last)
         ripper_action.triggered.connect(self.main.enable_ripper)
         info_action.triggered.connect(self.show_info)
         choose_action.triggered.connect(self.main.choose_file)
@@ -255,6 +261,7 @@ class PopupMenu(QMenu):
         exit_action.triggered.connect(sys.exit)
 
         # сборка выпадающего меню
+        self.addAction(cancel_action)
         self.addAction(ripper_action)
         self.addAction(info_action)
         self.addAction(choose_action)
@@ -317,6 +324,16 @@ class PopupMenu(QMenu):
 
             self.main.update_current_image(new_file_path)
             self.main.short_info.update()
+
+
+    def delete_last(self):
+        """
+        Удаляет последнее выделение
+        """
+        if len(self.main.imageviewer.rubberbands) > 0 :
+            self.main.imageviewer.rubberbands[len(self.main.imageviewer.rubberbands)-1].close()
+            del self.main.imageviewer.rubberbands[len(self.main.imageviewer.rubberbands)-1]
+
 
 
 class InfoLabel(QLabel):
@@ -433,6 +450,7 @@ class ImageViewer(QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setAlignment(Qt.AlignCenter)
+        self.rubberbands = []
 
         # на любителя: OpenGL
         if USE_OPENGL == 'Yes':
@@ -752,11 +770,18 @@ class ImageViewer(QGraphicsView):
         """
         # обработка щелчка левой кнопки мыши
         if event.button() ==  Qt.LeftButton:
-            self.lb_held = True
-            # обработка перемещения увеличенного изображения
+            self.lb_held        = True
+            #aaaaaa
+            self.rubberbands.append(QRubberBand(QRubberBand.Rectangle, self))
+            self.rubberband     = self.rubberbands[len(self.rubberbands)-1]
+            self.origin         = event.pos()
+            self.rubberband.setGeometry(
+                QRect(self.origin, QSize()))
+            self.rubberband.show()
+            QWidget.mousePressEvent(self, event)
 
 
-        # установка изображения в полный размер при нажатии на колёсико
+        # перемещение увеличенного изображения колёсиком
         if event.button() == Qt.MiddleButton:
             self.mb_held = True
             # обработка перемещения увеличенного изображения
@@ -780,8 +805,9 @@ class ImageViewer(QGraphicsView):
         """
         Обработка событий перемещения картинки в режиме «лупа»
         """
-        if self.is_magnified is True:
-            self.magnifier_move()
+        if self.lb_held :
+            self.rubberband.setGeometry( QRect(self.origin, event.pos()).normalized())
+            QWidget.mouseMoveEvent(self, event)
 
         elif self.is_scaled is True:
             QGraphicsView.mouseMoveEvent(self, event)
@@ -796,6 +822,7 @@ class ImageViewer(QGraphicsView):
         self.mb_held = False
         self.rb_held = False
 
+        #https://stackoverflow.com/questions/13840289/how-to-use-qrubberband-with-qrect-class-in-pyqt
         if event.button() == Qt.LeftButton:
             return
 
@@ -1334,4 +1361,3 @@ if __name__ == '__main__':
     mainwindow = MainWindow(start_image)
     mainwindow.show()
     sys.exit(app.exec_())
-#https://stackoverflow.com/questions/13840289/how-to-use-qrubberband-with-qrect-class-in-pyqt
