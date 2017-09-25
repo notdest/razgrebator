@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os , sys , time , math , shutil 
+import time
 import atexit  # для удаления временных файлов при выходе
 
 from PIL import Image
@@ -195,9 +196,17 @@ class PopupMenu(QMenu):
         self.file = ''
 
         # описание действий
+        # названия иконок отсюда
+        # https://specifications.freedesktop.org/icon-naming-spec/icon-naming-spec-latest.html
         cancel_action = QAction(
                 QIcon.fromTheme('edit-undo'),
                 'Отменить',
+                self
+        )
+
+        chfolder_action = QAction(
+                QIcon.fromTheme('folder'),
+                'Папка для сохранения',
                 self
         )
 
@@ -251,6 +260,7 @@ class PopupMenu(QMenu):
         )
 
         cancel_action.triggered.connect(self.delete_last)
+        chfolder_action.triggered.connect(self.main.changeFolder)
         ripper_action.triggered.connect(self.main.enable_ripper)
         info_action.triggered.connect(self.show_info)
         choose_action.triggered.connect(self.main.choose_file)
@@ -262,6 +272,7 @@ class PopupMenu(QMenu):
 
         # сборка выпадающего меню
         self.addAction(cancel_action)
+        self.addAction(chfolder_action)
         self.addAction(ripper_action)
         self.addAction(info_action)
         self.addAction(choose_action)
@@ -822,7 +833,7 @@ class ImageViewer(QGraphicsView):
         self.mb_held = False
         self.rb_held = False
 
-        #https://stackoverflow.com/questions/13840289/how-to-use-qrubberband-with-qrect-class-in-pyqt
+
         if event.button() == Qt.LeftButton:
             return
 
@@ -862,20 +873,21 @@ class MainWindow(QWidget):
                 caption='Выбор файла изображения'
                 )[0]
 
-        self.binds = []
-        self.is_image_altered = False
-        self.current_image = os.path.abspath(start_image)
-        self.last_image = self.current_image
-        self.program_icon = QIcon.fromTheme('pixelart-trace')
-        self.trash_path = os.path.expanduser('~') + '/.local/share/Trash'
-        self.screen_resolution = QApplication.desktop().screenGeometry()
+        self.savingFolder       = './'
+        self.binds              = []
+        self.is_image_altered   = False
+        self.current_image      = os.path.abspath(start_image)
+        self.last_image         = self.current_image
+        self.program_icon       = QIcon.fromTheme('pixelart-trace')
+        self.trash_path         = os.path.expanduser('~') + '/.local/share/Trash'
+        self.screen_resolution  = QApplication.desktop().screenGeometry()
 
         # для корректировки размера миниатюр
-        self.coefficient = 1.0
+        self.coefficient        = 1.0
 
         # размер рабочей области
-        self.frame_resolution_width = self.screen_resolution.width()
-        self.frame_resolution_height = self.screen_resolution.height()
+        self.frame_resolution_width     = self.screen_resolution.width()
+        self.frame_resolution_height    = self.screen_resolution.height()
 
         # доступные клавиши для привязывания сортировочных папок
         self.keys_for_bindings = (Qt.Key_Z, Qt.Key_X, Qt.Key_C, Qt.Key_V, Qt.Key_B,
@@ -1314,11 +1326,43 @@ class MainWindow(QWidget):
         """
         Запускает режим потрошения картинки на мелкие
         """
-        self.background_color.setNamedColor('#0000FF')
-        self.set_background(self.background_color)
-        self.imageviewer.brush = QBrush(self.background_color)
-        self.imageviewer.img_scene.setBackgroundBrush(self.imageviewer.brush)
+        while len(self.imageviewer.rubberbands)>0:
 
+
+            winSelection        = self.imageviewer.rubberbands[len(self.imageviewer.rubberbands)-1].geometry()
+            sceneSelection      = self.imageviewer.mapToScene(winSelection)
+            imgSelection        = self.imageviewer.img_item.mapFromParent(sceneSelection).boundingRect()
+            imgWidth, imgHeight = self.imageviewer.compute_scene()
+
+            # Ебись конем кьютовские классы, нихуя же не удобно, нормальными переменными обсчитаю координаты выделения
+            xl  = int((imgSelection.left()/imgWidth)*self.imageviewer.current_pixmap.width())
+            xr  = int((imgSelection.right()/imgWidth)*self.imageviewer.current_pixmap.width())
+            yt  = int((imgSelection.top()/imgHeight)*self.imageviewer.current_pixmap.height())
+            yb  = int((imgSelection.bottom()/imgHeight)*self.imageviewer.current_pixmap.height())
+
+
+            #print('xl',xl,'xr',xr,'yt',yt,'yb',yb)
+
+            text, accepted = QInputDialog.getText(self,
+                                                  "Называем файл",
+                                                  "Введите имя файла")
+            if accepted and text > '':
+                forSave     = self.imageviewer.current_pixmap.copy(xl, yt, xr-xl, yb-yt) 
+                forSave.save(self.savingFolder+'/'+text+'.jpg','JPEG', 90)    
+                self.popup.delete_last()        
+            else:
+                return
+
+    def changeFolder(self):
+        """
+        Диалог выбора папки для сохранения картинок
+        """
+        dialog              = QFileDialog()
+        self.savingFolder   = dialog.getExistingDirectory(
+                parent=None,
+                caption='Выбор папки для сохранения',
+                directory=self.savingFolder
+        )
 
         
 
@@ -1329,7 +1373,7 @@ def read_settings():
         SCALE_MAGNIFIER, MAGNIFIER_MOVE_BOOST, \
         BACKGROUND_COLOR, COPY_ON_SORTING, USE_OPENGL, SHOW_SHORT_INFO
 
-    WITHOUT_BORDER = 'Yes'
+    WITHOUT_BORDER = 'No'
     HINT_TIME = 2.5
     SCALE_STEP = 0.8
     ROTATE_STEP = 5.0
