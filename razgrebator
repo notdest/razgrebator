@@ -531,8 +531,8 @@ class ImageViewer(QGraphicsView):
             self.current_scale = self.scale_default
 
         self.img_item.setPixmap(
-                self.current_pixmap.scaled(self.current_img_width,
-                                           self.current_img_height,
+                self.current_pixmap.scaled(int(self.current_img_width),
+                                           int(self.current_img_height),
                                            Qt.KeepAspectRatio,
                                            Qt.SmoothTransformation
                                            )
@@ -552,8 +552,8 @@ class ImageViewer(QGraphicsView):
         vscroll_min = self.verticalScrollBar().minimum()
         vscroll_max = self.verticalScrollBar().maximum() - \
                       vscroll_min
-        self.horizontalScrollBar().setValue(hscroll_min + hscroll_max / 2)
-        self.verticalScrollBar().setValue(vscroll_min + vscroll_max / 2)
+        self.horizontalScrollBar().setValue(int(hscroll_min + hscroll_max / 2))
+        self.verticalScrollBar().setValue(int(vscroll_min + vscroll_max / 2))
 
     def rotate_widget(self, degree):
         """
